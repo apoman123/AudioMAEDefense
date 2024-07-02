@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
-from wav2vec2_convolution import *
-from wav2vec2_transformer import *
+from model.convolution_parts import *
+from model.transformer_parts import *
 import random
 
 KERNELS = [10,3,3,3,3,2,2]
@@ -74,7 +74,10 @@ class WaveRecontructor(nn.Module):
 
 
 class WaveMAE(nn.Module):
-    def __init__(self, in_channel, middle_channel, embed_dim, num_heads, kernels, strides, bias, dropout, depth, masking_mode, masked_ratio=0.8) -> None:
+    def __init__(self, in_channel=1, middle_channel=512, embed_dim=768, 
+                 num_heads=16, kernels=KERNELS, strides=STRIDES, 
+                 bias=True, dropout=DROPOUT, depth=12, 
+                 masking_mode="random", masked_ratio=0.8) -> None:
         super().__init__()
         self.masked_ratio = masked_ratio
         self.prenet = FeatureEncoder(in_channel, middle_channel, kernels, strides, bias, embed_dim)
@@ -103,7 +106,7 @@ class WaveMAE(nn.Module):
         return shuffled_tokens, token_order
     
     def uniform_mask(self, input_tensor):
-        # uniform mask omly deal with 25%, 50%, 75% mask ratio 
+        # uniform mask only deal with 25%, 50%, 75% mask ratio 
         bsz, seq_len, embed_dim = input_tensor.shape
         
         # overall idxes of the whole sequence
@@ -211,7 +214,7 @@ class WaveMAE(nn.Module):
 
         return input_tensor
              
-    def forward(self, input_tensor):
+    def forward(self, input_tensor, padding_mask=None):
         hidden_states = self.prenet(input_tensor)
         hidden_states = hidden_states + self.pos_embeding(hidden_states)
 
@@ -224,7 +227,7 @@ class WaveMAE(nn.Module):
         # encode
         # add cls token
         shuffled_tokens = torch.cat([self.cls_token, shuffled_tokens], dim=1)
-        shuffled_tokens = self.encoder(shuffled_tokens)[:, 1:, :] # take out the cls token
+        shuffled_tokens = self.encoder(shuffled_tokens, padding_mask=padding_mask)[:, 1:, :] # take out the cls token
 
         if self.masking_mode == "random":
             # append masked tokens and unshuffle
@@ -235,13 +238,11 @@ class WaveMAE(nn.Module):
         # decode
         # add cls token
         tokens = torch.cat([self.cls_token, shuffled_tokens], dim=1)
-        hidden_states = self.decoder(tokens)[:, 1:, :]
+        hidden_states = self.decoder(tokens, padding_mask=padding_mask)[:, 1:, :]
 
         # convert token to wave
         wave = self.postnet(hidden_states)
         return wave
-
-
 
 
         

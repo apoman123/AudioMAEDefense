@@ -3,6 +3,7 @@ import torch.nn as nn
 from typing import Optional, Tuple, OrderedDict
 from transformers.activations import ACT2FN
 import math
+
 class SinusoidalPositionalEmbedding(nn.Module):
     """This module produces sinusoidal positional embeddings of any length."""
 
@@ -117,13 +118,14 @@ class Attention(nn.Module):
             )
         self.scaling = self.head_dim**-0.5
 
+        self.multihead_attention = nn.MultiheadAttention(embed_dim, num_heads, dropout, bias, batch_first=True)
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+    # def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
+    #     return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
     def forward(
         self,
@@ -136,32 +138,34 @@ class Attention(nn.Module):
         bsz, tgt_len, _ = hidden_states.size()
 
         # get query proj
-        query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz)
+        query_states = self.q_proj(hidden_states)
         # get key, value proj, self_attention
-        key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
-        value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
 
         is_causal = True if self.is_causal and attention_mask is None and tgt_len > 1 else False
 
-        attn_output = nn.functional.scaled_dot_product_attention(
+        attn_output, _ = self.multihead_attention(
             query_states,
             key_states,
+            value_states,
+            key_padding_mask=padding_mask,
             attn_mask=attention_mask,
             dropout_p=self.dropout if self.training else 0.0,
             is_causal=is_causal
         )
 
-        if attn_output.size() != (bsz, self.num_heads, tgt_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
+        # if attn_output.size() != (bsz, self.num_heads, tgt_len, self.head_dim):
+        #     raise ValueError(
+        #         f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
+        #         f" {attn_output.size()}"
+        #     )
         
-        attn_output = attn_output.transpose(1, 2)
+        # attn_output = attn_output.transpose(1, 2)
 
         # Use the `embed_dim` from the config (stored in the class) rather than `hidden_state` because `attn_output` can be
         # partitioned across GPUs when using tensor-parallelism.
-        attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
+        # attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
 
         attn_output = self.out_proj(attn_output)
         return attn_output
