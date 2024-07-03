@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformer_parts import Attention, TransformerBlock, SinusoidalPositionalEmbedding
+from model.transformer_parts import Attention, TransformerBlock, SinusoidalPositionalEmbedding
 import random
 
 IN_CHANNEL=128
@@ -22,7 +22,7 @@ class PatchToEmbedding(nn.Module):
     def forward(self, input_tensor):
         embeddings = self.conv(input_tensor)
         return embeddings
-    
+
 class EmbeddingToPatch(nn.Module):
     def __init__(self, embed_dim, out_channel, kernel=16, stride=16) -> None:
         super().__init__()
@@ -52,17 +52,17 @@ class Decoder(nn.Module):
         self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, dropout, bias) for _ in range(depth)
         ])
-    
+
     def forward(self, embeddings, padding_mask=None):
         for block in self.blocks:
             embeddings = block(embeddings, padding_mask)
-        
+
         return embeddings
-    
+
 
 class SpectrogramMAE(nn.Module):
-    def __init__(self, in_channel=1, embed_dim=768, num_heads=16, 
-                 depth=12, masking_mode="random", dropout=0.1, 
+    def __init__(self, in_channel=1, embed_dim=768, num_heads=16,
+                 depth=12, masking_mode="random", dropout=0.1,
                  bias=True, mask_ratio=0.8) -> None:
         super().__init__()
         self.masking_mode = masking_mode
@@ -169,7 +169,7 @@ class SpectrogramMAE(nn.Module):
             mask[:, :, keep_idx, :, :] = True
 
             patches = torch.masked_fill(patches, mask, 0)
-        
+
         # reshape back to patches
         patches = torch.cat([patches, rest_patches], dim=1)
         patches = patches.reshape(bsz, channel_groups, 16, seq_groups, 16)
@@ -179,7 +179,7 @@ class SpectrogramMAE(nn.Module):
 
         return patches
 
-    
+
     def forward(self, input_tensor, padding_mask=None):
         if self.masking_mode == "random":
             input_tensor = self.random_mask(input_tensor)
