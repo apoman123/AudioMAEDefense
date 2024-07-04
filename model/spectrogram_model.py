@@ -15,7 +15,7 @@ EOS_TOKEN_ID=2
 
 class PatchToEmbedding(nn.Module):
     def __init__(self, in_channel, embed_dim, kernel=16, stride=16) -> None:
-        super().__init__()
+        super(PatchToEmbedding, self).__init__()
 
         self.conv = nn.Conv1d(in_channel, embed_dim, kernel, stride)
 
@@ -25,7 +25,7 @@ class PatchToEmbedding(nn.Module):
 
 class EmbeddingToPatch(nn.Module):
     def __init__(self, embed_dim, out_channel, kernel=16, stride=16) -> None:
-        super().__init__()
+        super(EmbeddingToPatch, self).__init__()
         self.deconv = nn.ConvTranspose1d(embed_dim, out_channel, kernel, stride)
 
     def forward(self, embeddings):
@@ -35,7 +35,7 @@ class EmbeddingToPatch(nn.Module):
 
 class Encoder(nn.Module):
     def __init__(self, embed_dim, num_heads, depth, dropout=0.1, bias=True) -> None:
-        super().__init__()
+        super(Encoder, self).__init__()
         self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, dropout, bias) for _ in range(depth)
         ])
@@ -48,7 +48,7 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
     def __init__(self, embed_dim, num_heads, depth, dropout=0.1, bias=True) -> None:
-        super().__init__()
+        super(Decoder, self).__init__()
         self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, dropout, bias) for _ in range(depth)
         ])
@@ -64,7 +64,7 @@ class SpectrogramMAE(nn.Module):
     def __init__(self, in_channel=1, embed_dim=768, num_heads=16,
                  depth=12, masking_mode="random", dropout=0.1,
                  bias=True, mask_ratio=0.8) -> None:
-        super().__init__()
+        super(SpectrogramMAE, self).__init__()
         self.masking_mode = masking_mode
         self.mask_ratio = mask_ratio
         self.patch_to_embedding = PatchToEmbedding(in_channel, embed_dim)

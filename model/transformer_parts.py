@@ -75,7 +75,7 @@ class SinusoidalPositionalEmbedding(nn.Module):
 
 class FeedForward(nn.Module):
     def __init__(self, activation_dropout, hidden_size, intermediate_size, hidden_act, hidden_dropout):
-        super().__init__()
+        super(FeedForward, self).__init__()
         self.intermediate_dropout = nn.Dropout(activation_dropout)
 
         self.intermediate_dense = nn.Linear(hidden_size, intermediate_size)
@@ -105,7 +105,7 @@ class Attention(nn.Module):
         bias: bool = True,
         is_causal=False
     ):
-        super().__init__()
+        super(Attention, self).__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.dropout = dropout
@@ -160,7 +160,7 @@ class Attention(nn.Module):
         #         f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
         #         f" {attn_output.size()}"
         #     )
-        
+
         # attn_output = attn_output.transpose(1, 2)
 
         # Use the `embed_dim` from the config (stored in the class) rather than `hidden_state` because `attn_output` can be
@@ -172,7 +172,7 @@ class Attention(nn.Module):
 
 class TransformerBlock(nn.Module):
     def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.1, bias: bool = True):
-        super().__init__()
+        super(TransformerBlock, self).__init__()
         self.layer_norm = nn.LayerNorm(embed_dim)
         self.attention = Attention(embed_dim, num_heads, dropout, bias)
         self.feed_forward = FeedForward(dropout, embed_dim, 4 * embed_dim, "gelu", dropout)
@@ -189,4 +189,3 @@ class TransformerBlock(nn.Module):
         hidden_states = self.layer_norm(hidden_states)
 
         return hidden_states
-    

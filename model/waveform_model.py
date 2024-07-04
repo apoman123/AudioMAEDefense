@@ -18,10 +18,10 @@ EOS_TOKEN_ID=2
 
 class FeatureEncoder(nn.Module):
     def __init__(self, in_cahnnel, out_channel, kernels, strides, bias, embed_dim) -> None:
-        super().__init__()
+        super(FeatureEncoder, self).__init__()
         self.group_norm_conv = GroupNormConvLayer(in_cahnnel, out_channel, kernels[0], strides[0], bias)
         self.feature_extractor = nn.ModuleList([
-            ConvLayer(out_channel, out_channel, kernel, stride, bias) for (kernel, stride) in (kernels, strides)
+            ConvLayer(out_channel, out_channel, kernel, stride, bias) for (kernel, stride) in zip(kernels, strides)
         ])
 
     def forward(self, hidden_states):
@@ -30,26 +30,26 @@ class FeatureEncoder(nn.Module):
             hidden_states = block(hidden_states)
 
         return hidden_states
-    
+
 class Encoder(nn.Module):
     def __init__(self, embed_dim, num_heads, dropout, bias, depth) -> None:
-        super().__init__()
+        super(Encoder, self).__init__()
         self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, dropout, bias) for _ in range(depth)
         ])
-        
+
     def forward(self, hidden_states):
         for block in self.blocks:
             hidden_states = block(hidden_states)
         return hidden_states
-    
+
 class Decoder(nn.Module):
     def __init__(self, embed_dim, num_heads, dropout, bias, depth) -> None:
-        super().__init__()
+        super(Decoder, self).__init__()
         self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, dropout, bias) for _ in range(depth)
         ])
-        
+
     def forward(self, hidden_states):
         for block in self.blocks:
             hidden_states = block(hidden_states)
@@ -58,14 +58,12 @@ class Decoder(nn.Module):
 
 class WaveRecontructor(nn.Module):
     def __init__(self, in_channel, out_channel, kernels, strides, bias) -> None:
-        super().__init__()
-        self.output_conv = TransposeBatchNormConvLayer(in_channel, out_channel, kernels[0], strides[0], bias)
-        kernels = kernels.pop(0)
-        strides = strides.pop(0)
+        super(WaveRecontructor, self).__init__()
         self.wave_reconstructor = nn.ModuleList([
-            TransposeBatchNormConvLayer(in_channel, in_channel, kernel, stride, bias) for (kernel, stride) in reversed(kernels, strides)
+            TransposeBatchNormConvLayer(in_channel, in_channel, kernel, stride, bias) for (kernel, stride) in zip(reversed(kernels), reversed(strides))
         ])
-        
+        self.output_conv = TransposeBatchNormConvLayer(in_channel, out_channel, kernels[0], strides[0], bias)
+
     def forward(self, hidden_states):
         for block in self.wave_reconstructor:
             hidden_states = block(hidden_states)
@@ -74,11 +72,11 @@ class WaveRecontructor(nn.Module):
 
 
 class WaveMAE(nn.Module):
-    def __init__(self, in_channel=1, middle_channel=512, embed_dim=768, 
-                 num_heads=16, kernels=KERNELS, strides=STRIDES, 
-                 bias=True, dropout=DROPOUT, depth=12, 
+    def __init__(self, in_channel=1, middle_channel=512, embed_dim=768,
+                 num_heads=16, kernels=KERNELS, strides=STRIDES,
+                 bias=True, dropout=DROPOUT, depth=12,
                  masking_mode="random", masked_ratio=0.8) -> None:
-        super().__init__()
+        super(WaveMAE, self).__init__()
         self.masked_ratio = masked_ratio
         self.prenet = FeatureEncoder(in_channel, middle_channel, kernels, strides, bias, embed_dim)
         self.pos_embeding = SinusoidalPositionalEmbedding(
@@ -88,7 +86,7 @@ class WaveMAE(nn.Module):
         )
         self.encoder = Encoder(embed_dim, num_heads, dropout, bias, depth)
         self.decoder = Decoder(embed_dim, num_heads, dropout, bias, depth)
-        self.postnet = WaveRecontructor(in_channel, middle_channel, kernels, strides, bias)
+        self.postnet = WaveRecontructor(middle_channel, in_channel, kernels, strides, bias)
 
         self.masked_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
@@ -104,11 +102,11 @@ class WaveMAE(nn.Module):
         # take some tokens out as masked tokens
         shuffled_tokens = shuffled_tokens[:, :int(seq_len*self.masked_ratio), :]
         return shuffled_tokens, token_order
-    
+
     def uniform_mask(self, input_tensor):
-        # uniform mask only deal with 25%, 50%, 75% mask ratio 
+        # uniform mask only deal with 25%, 50%, 75% mask ratio
         bsz, seq_len, embed_dim = input_tensor.shape
-        
+
         # overall idxes of the whole sequence
         token_idxes = torch.arange(seq_len)
 
@@ -140,7 +138,7 @@ class WaveMAE(nn.Module):
             select_mask = torch.zeros(cutted_token_idxes_shape).bool()
             select_mask[:, idx] = True
             cutted_token_idxes = torch.masked_select(cutted_token_idxes, select_mask)
-        
+
         elif self.masked_ratio == 0.50:
             # choose 2 token to preserve from every group with the same relative idx in every group
             idx1 = random.randint(0, 3)
@@ -181,7 +179,7 @@ class WaveMAE(nn.Module):
         token_idxes = torch.cat([cutted_token_idxes, rest_token_idxes], dim=1)
 
         return masked_tokens, token_idxes, seq_len
-    
+
     def add_masked_tokens_and_unshuffle(self, shuffled_tokens, token_order):
         bsz, seq_len, embed_dim = shuffled_tokens.shape
         original_seq_len = token_order.shape[0]
@@ -196,7 +194,7 @@ class WaveMAE(nn.Module):
         reversed_idx = torch.sort(token_order).indices
         tokens = shuffled_tokens[:, reversed_idx, :]
         return tokens
-    
+
     def uniform_add_masked_tokens_and_unshuffle(self, input_tensor, token_idxes, seq_len):
         # get full token idxes
         bsz, _, _ = input_tensor.shape
@@ -213,7 +211,7 @@ class WaveMAE(nn.Module):
         input_tensor = input_tensor[:, sorted_idxes, :]
 
         return input_tensor
-             
+
     def forward(self, input_tensor, padding_mask=None):
         hidden_states = self.prenet(input_tensor)
         hidden_states = hidden_states + self.pos_embeding(hidden_states)
@@ -234,7 +232,7 @@ class WaveMAE(nn.Module):
             tokens = self.add_masked_tokens_and_unshuffle(shuffled_tokens, token_order)
         elif self.masking_mode == "uniform":
             tokens = self.uniform_add_masked_tokens_and_unshuffle(shuffled_tokens, token_order, seq_len)
-            
+
         # decode
         # add cls token
         tokens = torch.cat([self.cls_token, shuffled_tokens], dim=1)
@@ -245,4 +243,4 @@ class WaveMAE(nn.Module):
         return wave
 
 
-        
+
