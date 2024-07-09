@@ -5,7 +5,7 @@ from transformers.activations import ACT2FN
 class GroupNormConvLayer(nn.Module):
     def __init__(self, in_channel, out_channel, kernel_size, stride, bias, hidden_act="gelu"):
         super(GroupNormConvLayer, self).__init__()
-        self.conv = nn.Conv1d(in_channel, out_channel, kernel_size, stride, bias)
+        self.conv = nn.Conv1d(in_channel, out_channel, kernel_size, stride, bias=bias)
         self.activation = ACT2FN[hidden_act]
         self.layer_norm = nn.GroupNorm(out_channel, out_channel, affine=True)
 
@@ -19,7 +19,7 @@ class GroupNormConvLayer(nn.Module):
 class ConvLayer(nn.Module):
     def __init__(self, in_channel, out_channel, kernel_size, stride, bias, hidden_act="gelu") -> None:
         super(ConvLayer, self).__init__()
-        self.conv = nn.Conv1d(in_channel, out_channel, kernel_size, stride, bias)
+        self.conv = nn.Conv1d(in_channel, out_channel, kernel_size, stride, bias=bias)
         self.activation = ACT2FN[hidden_act]
 
     def forward(self, hidden_states):
@@ -88,9 +88,9 @@ class InverseFeatureProjection(nn.Module):
         return hidden_states
 
 class TransposeConvLayer(nn.Module):
-    def __init__(self, in_channel, out_channel, kernel_size, stride, bias, hidden_act="gelu") -> None:
+    def __init__(self, in_channel, out_channel, kernel_size, stride, bias, out_pad, hidden_act="gelu") -> None:
         super(TransposeConvLayer, self).__init__()
-        self.conv = nn.ConvTranspose1d(in_channel, out_channel, kernel_size, stride, bias)
+        self.conv = nn.ConvTranspose1d(in_channel, out_channel, kernel_size, stride, bias=bias, output_padding=out_pad)
         self.activation = ACT2FN[hidden_act]
 
     def forward(self, hidden_states):
@@ -99,9 +99,9 @@ class TransposeConvLayer(nn.Module):
         return hidden_states
 
 class TransposeBatchNormConvLayer(nn.Module):
-    def __init__(self, in_channel, out_channel, kernel_size, stride, bias, hidden_act="gelu") -> None:
+    def __init__(self, in_channel, out_channel, kernel_size, stride, bias, out_pad, hidden_act="gelu") -> None:
         super(TransposeBatchNormConvLayer, self).__init__()
-        self.conv = nn.ConvTranspose1d(in_channel, out_channel, kernel_size, stride, bias)
+        self.conv = nn.ConvTranspose1d(in_channel, out_channel, kernel_size, stride, bias=bias, output_padding=out_pad)
         self.activation = ACT2FN[hidden_act]
         self.batch_norm = nn.BatchNorm1d(out_channel)
 
@@ -112,9 +112,9 @@ class TransposeBatchNormConvLayer(nn.Module):
         return hidden_states
 
 class GroupNormTransposeConvLayer(nn.Module):
-    def __init__(self, in_channel, out_channel, kernel_size, stride, bias, hidden_act="gelu"):
+    def __init__(self, in_channel, out_channel, kernel_size, stride, bias, out_pad, hidden_act="gelu"):
         super(GroupNormTransposeConvLayer, self).__init__()
-        self.conv = nn.ConvTranspose1d(in_channel, out_channel, kernel_size, stride, bias)
+        self.conv = nn.ConvTranspose1d(in_channel, out_channel, kernel_size, stride, bias=bias, output_padding=out_pad)
         self.activation = ACT2FN[hidden_act]
         self.layer_norm = nn.GroupNorm(out_channel, out_channel, affine=True)
 

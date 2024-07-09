@@ -145,11 +145,17 @@ class Attention(nn.Module):
 
         is_causal = True if self.is_causal and attention_mask is None and tgt_len > 1 else False
 
+        # process the padding mask
+        if padding_mask != None:
+            processed_padding_mask = torch.logical_not(padding_mask.bool())
+        else:
+            processed_padding_mask = None
+
         attn_output, _ = self.multihead_attention(
             query_states,
             key_states,
             value_states,
-            key_padding_mask=padding_mask,
+            key_padding_mask=processed_padding_mask,
             attn_mask=attention_mask,
             dropout_p=self.dropout if self.training else 0.0,
             is_causal=is_causal
