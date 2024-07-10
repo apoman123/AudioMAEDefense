@@ -6,7 +6,7 @@ import torch
 def wave_padding(batch):
     lengths = [dic["audio"]["array"].shape[0] for dic in batch]
     max_length = max(lengths)
-    additional_pads = max_length % 8000 # every sequence length that is the multiple of 8000 can be deconvoluted propoerly to original sequence length
+    additional_pads = 1600 - max_length % 1600 # every sequence length that is the multiple of 8000 can be deconvoluted propoerly to original sequence length
     new_max_length = max_length + additional_pads
 
     waves = np.array([np.concatenate([dic["audio"]["array"], np.zeros(new_max_length - length)], axis=0) for dic, length in zip(batch, lengths)])
@@ -18,7 +18,7 @@ def spectrogram_padding(batch, num_mels=128): # spectrogram has 128 mels
     spectrogram_lengths = [spec.shape[2] for spec in spectrograms]
 
     max_length = max(spectrogram_lengths)
-    additional_pads = max_length % 16 # needs to pad the spectrogram to have sequence length of the multiple of 16
+    additional_pads = 16 - max_length % 16 # needs to pad the spectrogram to have sequence length of the multiple of 16
     new_max_length = max_length + additional_pads
 
     padded_spectrograms = np.array([np.concatenate([spec, np.zeros(1, num_mels, new_max_length - length)]) for spec, length in zip(spectrograms, spectrogram_lengths)])

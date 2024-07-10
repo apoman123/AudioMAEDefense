@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from model.transformer_parts import Attention, TransformerBlock, SinusoidalPositionalEmbedding
+from model.transformer_parts import Attention, TransformerBlock, SinusoidalPositionalEncoding
 import random
 
 IN_CHANNEL=128
@@ -68,11 +68,7 @@ class SpectrogramMAE(nn.Module):
         self.masking_mode = masking_mode
         self.mask_ratio = mask_ratio
         self.patch_to_embedding = PatchToEmbedding(in_channel, embed_dim)
-        self.pos_embeding = SinusoidalPositionalEmbedding(
-            MAX_SPEECH_POSITIONS + PAD_TOKEN_ID + 1,
-            embed_dim,
-            PAD_TOKEN_ID
-        )
+        self.pos_embeding = SinusoidalPositionalEmbedding(embed_dim)
         self.encoder = Encoder(embed_dim, num_heads, depth, dropout, bias)
         self.decoder = Decoder(embed_dim, num_heads, depth, dropout, bias)
         self.embedding_to_patch = EmbeddingToPatch(embed_dim, in_channel)
@@ -188,7 +184,7 @@ class SpectrogramMAE(nn.Module):
             input_tensor = self.uniform_mask(input_tensor)
 
         embeddings = self.patch_to_embedding(input_tensor)
-        embeddings = embeddings + self.pos_embeding(embeddings)
+        embeddings = self.pos_embeding(embeddings)
 
         # add cls token
         embeddings = torch.cat([self.cls_token, embeddings], dim=1)

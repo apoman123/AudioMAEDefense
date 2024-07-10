@@ -314,7 +314,7 @@ class WaveMAE(nn.Module):
         # add cls token
         shuffled_tokens = torch.cat([self.cls_token.expand(shuffled_tokens.shape[0], 1, shuffled_tokens.shape[2]), shuffled_tokens], dim=1)
         if masked_padding_mask != None:
-            masked_padding_mask = torch.cat([torch.ones((masked_padding_mask.shape[0], 1)).bool(), masked_padding_mask], dim=1)
+            masked_padding_mask = torch.cat([torch.ones((masked_padding_mask.shape[0], 1)).bool().to(masked_padding_mask.device), masked_padding_mask], dim=1)
 
         # encode
         shuffled_tokens = self.encoder(shuffled_tokens, padding_mask=masked_padding_mask)[:, 1:, :] # take out the cls token
@@ -329,7 +329,7 @@ class WaveMAE(nn.Module):
         # add cls token
         tokens = torch.cat([self.cls_token.expand(tokens.shape[0], 1, tokens.shape[2]), tokens], dim=1)
         if padding_mask != None:
-            padding_mask = torch.cat([torch.ones((padding_mask.shape[0], 1)).bool(), padding_mask], dim=1)
+            padding_mask = torch.cat([torch.ones((padding_mask.shape[0], 1)).bool().to(padding_mask.device), padding_mask], dim=1)
 
         # decode
         hidden_states = self.decoder(tokens, padding_mask=padding_mask)[:, 1:, :]
