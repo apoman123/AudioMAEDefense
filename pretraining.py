@@ -14,7 +14,7 @@ from torch.distributed import init_process_group, destroy_process_group
 from accelerate import Accelerator
 from tqdm import tqdm
 from transformers import SequenceFeatureExtractor
-
+from torch.utils.tensorboard import SummaryWriter
 
 from model.waveform_model import WaveMAE
 from model.spectrogram_model import SpectrogramMAE
@@ -46,6 +46,7 @@ def get_args():
     parser.add_argument("--model_path", default=None, type=str)
     parser.add_argument("--save_path", type=str)
     parser.add_argument("--show_every", default=5, type=int)
+    parser.add_argument("--log_dir", type=str)
 
     return parser
 
@@ -91,6 +92,8 @@ def main(args):
     model.to(device_id)
     ddp_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     ddp_model = DistributedDataParallel(ddp_model, device_ids=[rank], output_device=rank)
+    
+    print(f"Model is: {model}")
 
     # optimization
     lr = args.lr
@@ -98,6 +101,10 @@ def main(args):
     loss_fn = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.LinearLR(optimizer)
+
+    print(f"Loss function is: {loss_fn}")
+    print(f"Optimizer is: {optimizer}")
+    print(f"LR Scheduler is: {scheduler}")
 
     # resume
     if args.model_path != None:
@@ -117,44 +124,43 @@ def main(args):
     # training loop
     ddp_model.train()
     print(f"start training model for {epochs}")
-    for epoch in tqdm(range(epochs)):
-        pbar = tqdm(enumerate(train_loader))
-        for step, input_tensor, padding_masks in pbar:
-            steps_start_time = time.time()
-            # input to the model
-            result = ddp_model(input_tensor, padding_masks)
+    with tqdm(total=len(train_loader) * epochs) as pbar:
+        for epoch in range(epochs):
+            total_loss = 0
+            for step, input_tensor, padding_masks in enumerate(train_loader):
+                # input to the model
+                result = ddp_model(input_tensor, padding_masks)
 
-            # calc the loss
-            loss = loss_fn(result, input_tensor)
+                # calc the loss
+                loss = loss_fn(result, input_tensor)
+                total_loss += loss.item()
 
-            # calc the gradient
-            accelerator.backward(loss)
+                # calc the gradient
+                accelerator.backward(loss)
 
 
-            if (step+1) % args.show_every:
-                steps_stop_time = time.time()
-                # cost for a step
-                step_time = steps_stop_time - steps_start_time
-                pbar.set_description()
-                # print(f"Epoch: {epoch+1}/{epochs} | Step: {step+1}/{len(train_loader)} | Loss: {loss.item()}")
+                if (step+1) % args.show_every:
+                    pbar.set_description(f"Epoch: {epoch+1}/{epochs} | Step: {step+1}/{len(train_loader)}")
+                    pbar.set_postfix(loss="%.4f".format(loss.item()), lr="%.4f".format(optimizer.param_groups[0]["lr"]))
 
-            if (step+1) % args.accum_steps == 0:
-                # update the model
-                optimizer.step()
-                scheduler.step(loss)
-                optimizer.zero_grad()
+                if (step+1) % args.accum_steps == 0:
+                    # update the model
+                    optimizer.step()
+                    scheduler.step(loss)
+                    optimizer.zero_grad()
 
-        if (epoch+1) % args.save_epoch == 0:
-            checkpoint = {
-                "epoch": epoch,
-                "model": ddp_model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler
-            }
-            torch.save(checkpoint, args.save_path + f"{model.__class__.__name__}_epoch_{epoch+1}")
+            if (epoch+1) % args.save_epoch == 0:
+                checkpoint = {
+                    "epoch": epoch,
+                    "model": ddp_model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler
+                }
+                torch.save(checkpoint, args.save_path + f"{model.__class__.__name__}_epoch_{epoch+1}")
 
 if __name__ == "__main__":
     parser = get_args()
     args = parser.parse_args()
     ddp_setup()
     main(args)
+    destroy_process_group()
