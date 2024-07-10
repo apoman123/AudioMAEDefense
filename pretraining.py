@@ -26,6 +26,7 @@ def get_args():
     # dataset configuration
     parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument("--batch_size", default=512, type=int)
+    parser.add_argument("--accum_steps", default=0, type=int)
     parser.add_argument("--pin_memory", default=True, type=bool)
 
     # model configuration
@@ -41,7 +42,6 @@ def get_args():
     parser.add_argument("--epochs", default=100, type=int)
     parser.add_argument("--lr", default=1e-5, type=float)
     parser.add_argument("--max_lr", default=2e-4, type=float)
-    parser.add_argument("--accum_steps", default=0, type=int)
     parser.add_argument("--save_epoch", default=5, type=int)
     parser.add_argument("--model_path", default=None, type=str)
     parser.add_argument("--save_path", type=str)
@@ -120,6 +120,8 @@ def main(args):
         model, optimizer, train_loader, scheduler
     )
 
+    # summary writer
+    writer = SummaryWriter(log_dir=args.log_dir)
 
     # training loop
     ddp_model.train()
@@ -157,6 +159,9 @@ def main(args):
                     "scheduler": scheduler
                 }
                 torch.save(checkpoint, args.save_path + f"{model.__class__.__name__}_epoch_{epoch+1}")
+            
+            # record the total loss
+            writer.add_scalar("Training Loss", total_loss, epoch)
 
 if __name__ == "__main__":
     parser = get_args()

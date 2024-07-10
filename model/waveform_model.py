@@ -70,7 +70,7 @@ class FeatureEncoder(nn.Module):
             hidden_states = block(hidden_states)
 
         if padding_mask != None:
-            padding_mask = self._get_feature_vector_padding_mask(hidden_states.shape[1], padding_mask)
+            padding_mask = self._get_feature_vector_padding_mask(hidden_states.shape[2], padding_mask)
 
         return hidden_states, padding_mask
 
@@ -85,7 +85,7 @@ class Encoder(nn.Module):
         for block in self.blocks:
             hidden_states = block(hidden_states, padding_mask)
 
-        return hidden_states, padding_mask
+        return hidden_states
 
 class Decoder(nn.Module):
     def __init__(self, embed_dim, num_heads, dropout, bias, depth) -> None:
@@ -135,13 +135,11 @@ class WaveMAE(nn.Module):
         super(WaveMAE, self).__init__()
         self.masked_ratio = masked_ratio
         self.prenet = FeatureEncoder(in_channel, middle_channel, kernels, strides, bias, embed_dim)
-        self.pos_embeding = SinusoidalPositionalEmbedding(
-            MAX_SPEECH_POSITIONS + PAD_TOKEN_ID + 1,
-            embed_dim,
-            PAD_TOKEN_ID
-        )
+        self.in_feature_projection = nn.Conv1d(middle_channel, embed_dim, 1, 1)
+        self.pos_embeding = SinusoidalPositionalEncoding(embed_dim)
         self.encoder = Encoder(embed_dim, num_heads, dropout, bias, depth)
         self.decoder = Decoder(embed_dim, num_heads, dropout, bias, depth)
+        self.out_feature_projection = nn.Conv1d(embed_dim, middle_channel, 1, 1)
         self.postnet = WaveRecontructor(middle_channel, in_channel, kernels, strides, bias)
 
         self.masked_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
@@ -151,7 +149,6 @@ class WaveMAE(nn.Module):
     def random_mask(self, input_tensor, padding_mask=None):
         bsz, seq_len, embed_dim = input_tensor.shape
         token_order = torch.randperm(seq_len)
-
         # shuffle
         shuffled_tokens = input_tensor[:, token_order, :]
 
@@ -160,8 +157,8 @@ class WaveMAE(nn.Module):
 
         # deal with padding mask
         if padding_mask != None:
-            shuffled_padding_mask = padding_mask[:, token_order, :]
-            padding_mask = padding_mask[:, :int(seq_len*self.masked_ratio), :]
+            shuffled_padding_mask = padding_mask[:, token_order]
+            padding_mask = shuffled_padding_mask[:, :int(seq_len*self.masked_ratio)]
 
         return shuffled_tokens, token_order, padding_mask
 
@@ -303,8 +300,9 @@ class WaveMAE(nn.Module):
     def forward(self, input_tensor, padding_mask=None):
         full_padding_mask = padding_mask
         hidden_states, padding_mask = self.prenet(input_tensor, padding_mask)
-        hidden_states = hidden_states + self.pos_embeding(hidden_states)
+        hidden_states = self.in_feature_projection(hidden_states)
         hidden_states = hidden_states.transpose(1, 2)
+        hidden_states = self.pos_embeding(hidden_states)
 
         # shuffle
         if self.masking_mode == "random":
@@ -312,30 +310,41 @@ class WaveMAE(nn.Module):
         elif self.masking_mode == "uniform":
             shuffled_tokens, token_order, seq_len, masked_padding_mask = self.uniform_mask(hidden_states, padding_mask)
 
+       
+        # add cls token
+        shuffled_tokens = torch.cat([self.cls_token.expand(shuffled_tokens.shape[0], 1, shuffled_tokens.shape[2]), shuffled_tokens], dim=1)
+        if masked_padding_mask != None:
+            masked_padding_mask = torch.cat([torch.ones((masked_padding_mask.shape[0], 1)).bool(), masked_padding_mask], dim=1)
 
         # encode
-        # add cls token
-        shuffled_tokens = torch.cat([self.cls_token, shuffled_tokens], dim=1)
         shuffled_tokens = self.encoder(shuffled_tokens, padding_mask=masked_padding_mask)[:, 1:, :] # take out the cls token
 
         if self.masking_mode == "random":
             # append masked tokens and unshuffle
-            tokens, padding_mask = self.add_masked_tokens_and_unshuffle(shuffled_tokens, token_order, padding_mask)
+            tokens = self.add_masked_tokens_and_unshuffle(shuffled_tokens, token_order)
         elif self.masking_mode == "uniform":
-            tokens, padding_mask = self.uniform_add_masked_tokens_and_unshuffle(shuffled_tokens, token_order, seq_len, padding_mask)
+            tokens = self.uniform_add_masked_tokens_and_unshuffle(shuffled_tokens, token_order, seq_len)
+
+        
+        # add cls token
+        tokens = torch.cat([self.cls_token.expand(tokens.shape[0], 1, tokens.shape[2]), tokens], dim=1)
+        if padding_mask != None:
+            padding_mask = torch.cat([torch.ones((padding_mask.shape[0], 1)).bool(), padding_mask], dim=1)
 
         # decode
-        # add cls token
-        tokens = torch.cat([self.cls_token, shuffled_tokens], dim=1)
         hidden_states = self.decoder(tokens, padding_mask=padding_mask)[:, 1:, :]
         hidden_states = hidden_states.transpose(1, 2)
+
+        # out feature projection
+        hidden_states = self.out_feature_projection(hidden_states)
 
         # convert token to wave
         wave = self.postnet(hidden_states)
 
         # mask out the padding part
         if full_padding_mask != None:
-            wave = torch.masked_fill(wave, full_padding_mask == 0, 0)
+            full_padding_mask = full_padding_mask.unsqueeze(1)
+            wave = wave.masked_fill(full_padding_mask == 0, 0)
 
         return wave
 
