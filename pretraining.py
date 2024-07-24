@@ -43,8 +43,9 @@ def get_args():
     parser.add_argument("--epochs", default=100, type=int)
     parser.add_argument("--lr", default=1e-5, type=float)
     parser.add_argument("--max_lr", default=2e-4, type=float)
-    parser.add_argument("--save_epoch", default=5, type=int)
+    parser.add_argument("--save_epoch", default=1, type=int)
     parser.add_argument("--model_path", default=None, type=str)
+    parser.add_argument("--resume", default=False, type=bool)
     parser.add_argument("--save_path", type=str)
     parser.add_argument("--log_dir", type=str)
 
@@ -93,10 +94,10 @@ def main(args):
                         depth=args.depth, masking_mode=args.masking_mode, masked_ratio=args.masked_ratio)
     elif args.model_type == "spectrogram":
         model = SpectrogramMAE(embed_dim=args.embed_dim, num_heads=args.num_heads, depth=args.depth,
-                            masking_mode=args.masking_mode, mask_ratio=args.mask_ratio)
+                            masking_mode=args.masking_mode, mask_ratio=args.masked_ratio)
     model.to(device_id)
     ddp_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    ddp_model = DistributedDataParallel(ddp_model, device_ids=[rank], output_device=rank)
+    ddp_model = DistributedDataParallel(ddp_model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
     
     print(f"Model is: {model}")
 
@@ -114,10 +115,13 @@ def main(args):
     # resume
     if args.model_path != None:
         checkpoint = torch.load(args.model_path)
+        start_epoch = checkpoint["epoch"]
         ddp_model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
-        scheduler = checkpoint['scheduler']
-        print(f"load state dict from {args.model_path} and resume training from epoch {args.resume_epoch}")
+        scheduler.load_state_dict(checkpoint['scheduler'])
+        print(f"load state dict from {args.model_path} and resume training from epoch {start_epoch+1}")
+    else:
+        start_epoch = 0
 
     # accelerate
     accelerator = Accelerator()
@@ -126,13 +130,18 @@ def main(args):
     )
 
     # summary writer
-    writer = SummaryWriter(log_dir=args.log_dir)
+    if rank == 0:
+        writer = SummaryWriter(log_dir=args.log_dir)
 
     # training loop
     ddp_model.train()
     print(f"start training model for {epochs}")
     with tqdm(total=len(train_loader) * epochs) as pbar:
-        for epoch in range(epochs):
+        for epoch in range(start_epoch, epochs):
+            if start_epoch != 0 and args.resume:
+                args.resume = False
+                pbar.update((start_epoch+1)*len(train_loader))
+                
             total_loss = 0
             for step, data in enumerate(train_loader):
                 
@@ -145,7 +154,7 @@ def main(args):
                 # calc the loss
                 loss = loss_fn(result, input_tensor)
                 total_loss += loss.item()
-
+                
                 # calc the gradient
                 accelerator.backward(loss)
 
@@ -157,21 +166,26 @@ def main(args):
                 if (step+1) % args.accum_steps == 0:
                     # update the model
                     optimizer.step()
-                    scheduler.step(loss)
                     optimizer.zero_grad()
 
+               
+                    
+            # step the scheduler     
+            scheduler.step()
+            
             if (epoch+1) % args.save_epoch == 0:
                 checkpoint = {
                     "epoch": epoch,
                     "model": ddp_model.state_dict(),
                     "optimizer": optimizer.state_dict(),
-                    "scheduler": scheduler
+                    "scheduler": scheduler.state_dict()
                 }
-                torch.save(checkpoint, args.save_path + f"{model.__class__.__name__}_epoch_{epoch+1}")
+                torch.save(checkpoint, args.save_path + f"/{model.__class__.__name__}_epoch_{epoch+1}.pth")
             
             # record the total loss
             mean_loss = total_loss / len(train_loader)
-            writer.add_scalar("Training Loss", mean_loss, epoch)
+            if rank == 0:
+                writer.add_scalar("Training Loss", mean_loss, epoch+1)
 
 if __name__ == "__main__":
     parser = get_args()
