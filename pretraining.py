@@ -148,17 +148,11 @@ def main(args):
                 input_tensor = data["input_values"].to(device_id)
                 padding_masks = data["padding_masks"].to(device_id)
 
-                if data["full_padding_masks"]:
-                    full_padding_masks = None
-                else:
-                    full_padding_masks = data["full_padding_masks"].to(device_id)
-
-                # input to the model
-                if full_padding_masks:
+                if args.model_type == "waveform":
                     result = ddp_model(input_tensor, padding_masks)
-                else:
+                elif args.model_type == "spectrogram":
+                    full_padding_masks = data["full_padding_masks"].to(device_id)
                     result = ddp_model(input_tensor, padding_masks, full_padding_masks)
-
 
                 # calc the loss
                 loss = loss_fn(result, input_tensor)
