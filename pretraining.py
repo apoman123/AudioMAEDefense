@@ -79,7 +79,7 @@ def main(args):
     if rank != 0:
         f = open(os.devnull, 'w')
         sys.stdout = f
-        
+
     # dataset
     training_set = load_from_disk("/home/apoman123/data/nas07/Dataset/Audio/audioset_full_training_set")
     training_set_sampler = DistributedSampler(training_set, shuffle=True)
@@ -87,7 +87,7 @@ def main(args):
                             num_workers=args.num_workers, pin_memory=True,
                             collate_fn=collate_fn) # add collate function if needed
     print(f"effective batch size is {args.batch_size * dist.get_world_size() * args.accum_steps}")
-    
+
     # model
     if args.model_type == "waveform":
         model = WaveMAE(middle_channel=args.middle_channel, embed_dim=args.embed_dim, num_heads=args.num_heads,
@@ -98,7 +98,7 @@ def main(args):
     model.to(device_id)
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     ddp_model = DistributedDataParallel(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
-    
+
     print(f"Model is: {model}")
 
     # optimization
@@ -141,20 +141,28 @@ def main(args):
             if start_epoch != 0 and args.resume:
                 args.resume = False
                 pbar.update((start_epoch+1)*len(train_loader))
-                
+
             total_loss = 0
             for step, data in enumerate(train_loader):
-                
+
                 input_tensor = data["input_values"].to(device_id)
                 padding_masks = data["padding_masks"].to(device_id)
 
+                if data["full_padding_masks"] != None:
+                    full_padding_masks = data["full_padding_masks"].to(device_id)
+                else:
+                    full_padding_masks = None
+
                 # input to the model
-                result = ddp_model(input_tensor, padding_masks)
+                if full_padding_masks != None:
+                    result = ddp_model(input_tensor, padding_masks, full_padding_masks)
+                else:
+                    result = ddp_model(input_tensor, padding_masks)
 
                 # calc the loss
                 loss = loss_fn(result, input_tensor)
                 total_loss += loss.item()
-                
+
                 # calc the gradient
                 accelerator.backward(loss)
 
@@ -168,11 +176,11 @@ def main(args):
                     optimizer.step()
                     optimizer.zero_grad()
 
-               
-                    
-            # step the scheduler     
+
+
+            # step the scheduler
             scheduler.step()
-            
+
             if (epoch+1) % args.save_epoch == 0:
                 checkpoint = {
                     "epoch": epoch,
@@ -181,7 +189,7 @@ def main(args):
                     "scheduler": scheduler.state_dict()
                 }
                 torch.save(checkpoint, args.save_path + f"/{model.__class__.__name__}_epoch_{epoch+1}.pth")
-            
+
             # record the total loss
             mean_loss = total_loss / len(train_loader)
             if rank == 0:

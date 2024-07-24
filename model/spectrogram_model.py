@@ -27,12 +27,10 @@ class EmbeddingToPatch(nn.Module):
     def __init__(self, embed_dim, out_channel, kernel=16, stride=16) -> None:
         super(EmbeddingToPatch, self).__init__()
 
-        self.layer_norm = nn.LayerNorm(embed_dim)
         self.linear = nn.Linear(embed_dim, kernel * stride * out_channel, bias=True)
-        
 
     def forward(self, embeddings):
-        result = self.linear(self.layer_norm(embeddings))
+        result = self.linear(embeddings)
         return result
 
 
@@ -42,11 +40,12 @@ class Encoder(nn.Module):
         self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, dropout, bias) for _ in range(depth)
         ])
+        self.layer_norm = nn.LayerNorm(embed_dim)
 
     def forward(self, embeddings, padding_mask=None):
         for block in self.blocks:
             embeddings = block(embeddings, padding_mask)
-        return embeddings
+        return self.layer_norm(embeddings)
 
 
 class Decoder(nn.Module):
@@ -55,12 +54,13 @@ class Decoder(nn.Module):
         self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, dropout, bias) for _ in range(depth)
         ])
+        self.layer_norm = nn.LayerNorm(embed_dim)
 
     def forward(self, embeddings, padding_mask=None):
         for block in self.blocks:
             embeddings = block(embeddings, padding_mask)
 
-        return embeddings
+        return self.layer_norm(embeddings)
 
 
 class SpectrogramMAE(nn.Module):
@@ -231,14 +231,14 @@ class SpectrogramMAE(nn.Module):
         return input_tensor
 
 
-    def forward(self, input_tensor, padding_masks=None):
+    def forward(self, input_tensor, padding_masks=None, full_padding_masks=None):
         # patch to embedding
         bsz, channel, height, width = input_tensor.shape
         embeddings = self.patch_to_embedding(input_tensor)
         _, embed_dim, _, _ = embeddings.shape
 
         # reshape to (bsz, seq_len, embed_dim)
-        embeddings = embeddings.reshape(bsz, -1, embed_dim)
+        embeddings = embeddings.flatten(2).transpose(1, 2)
 
         if self.masking_mode == "random":
             masked_tokens, token_order, masked_padding_masks = self.random_mask(embeddings, padding_masks)
@@ -280,12 +280,8 @@ class SpectrogramMAE(nn.Module):
         spectrograms = spectrograms.reshape(bsz, channel, height, width)
 
         # mask out the padding part
-        if padding_masks != None:
-            padding_masks = padding_masks[:, 1:] # take off the appended zero for cls token
-            bsz, seq_len = padding_masks.shape
-            full_padding_mask = padding_masks.unsqueeze(-1).expand(bsz, seq_len, 16*16).reshape(bsz, -1, seq_len * 16 * 16 // width)
-            spectrogram_masks = full_padding_mask.transpose(1, 2).unsqueeze(1)
-            spectrograms = spectrograms.masked_fill(spectrogram_masks == 0, 0)
+        if full_padding_masks != None:
+            spectrograms = spectrograms.masked_fill(full_padding_masks == 0, 0)
 
         return spectrograms
 

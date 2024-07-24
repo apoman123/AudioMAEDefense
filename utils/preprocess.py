@@ -12,7 +12,9 @@ def wave_padding(batch):
 
     waves = np.array([np.concatenate([dic["audio"]["array"], np.zeros(new_max_length - length)], axis=0) for dic, length in zip(batch, lengths)])
     padding_masks = np.array([np.concatenate([np.ones(length), np.zeros(new_max_length - length)]) for length in lengths])
-    return {"input_values": torch.tensor(waves).unsqueeze(1).float(), "padding_masks": torch.tensor(padding_masks).float()}
+    return {"input_values": torch.tensor(waves).unsqueeze(1).float(),
+            "padding_masks": torch.tensor(padding_masks).float(),
+            "full_padding_masks": None}
 
 def spectrogram_padding(batch, num_mels=128): # spectrogram has 128 mels
     spectrograms = [np.squeeze(np.array(dic["spectrogram"]), axis=0) for dic in batch]
@@ -44,5 +46,13 @@ def spectrogram_padding(batch, num_mels=128): # spectrogram has 128 mels
 
     padding_masks = np.squeeze(padding_masks, axis=1)
 
+    # full padding mask
+    full_padding_mask = np.expand_dims(
+        np.array([np.concatenate([np.ones(spec.shape), np.zeros((num_mels, new_max_length - length))], axis=1) for spec, length in zip(spectrograms, spectrogram_lengths)])
+        , axis=1
+    )
 
-    return {"input_values": torch.tensor(padded_spectrograms).float(), "padding_masks": torch.tensor(padding_masks).float()}
+    return {"input_values": torch.tensor(padded_spectrograms).float(),
+            "padding_masks": torch.tensor(padding_masks).float(),
+            "full_padding_masks": full_padding_mask
+            }
