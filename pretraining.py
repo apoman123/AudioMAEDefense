@@ -96,8 +96,8 @@ def main(args):
         model = SpectrogramMAE(embed_dim=args.embed_dim, num_heads=args.num_heads, depth=args.depth,
                             masking_mode=args.masking_mode, mask_ratio=args.masked_ratio)
     model.to(device_id)
-    ddp_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    ddp_model = DistributedDataParallel(ddp_model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+    model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+    ddp_model = DistributedDataParallel(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
     
     print(f"Model is: {model}")
 
@@ -147,7 +147,7 @@ def main(args):
                 
                 input_tensor = data["input_values"].to(device_id)
                 padding_masks = data["padding_masks"].to(device_id)
-                
+
                 # input to the model
                 result = ddp_model(input_tensor, padding_masks)
 

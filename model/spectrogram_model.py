@@ -27,11 +27,12 @@ class EmbeddingToPatch(nn.Module):
     def __init__(self, embed_dim, out_channel, kernel=16, stride=16) -> None:
         super(EmbeddingToPatch, self).__init__()
 
+        self.layer_norm = nn.LayerNorm(embed_dim)
         self.linear = nn.Linear(embed_dim, kernel * stride * out_channel, bias=True)
-        self.batch_norm = nn.BatchNorm2d(embed_dim)
+        
 
     def forward(self, embeddings):
-        result = self.linear(self.batch_norm(embeddings))
+        result = self.linear(self.layer_norm(embeddings))
         return result
 
 
