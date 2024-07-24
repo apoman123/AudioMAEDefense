@@ -54,5 +54,5 @@ def spectrogram_padding(batch, num_mels=128): # spectrogram has 128 mels
 
     return {"input_values": torch.tensor(padded_spectrograms).float(),
             "padding_masks": torch.tensor(padding_masks).float(),
-            "full_padding_masks": full_padding_mask
+            "full_padding_masks": torch.tensor(full_padding_mask).float()
             }
