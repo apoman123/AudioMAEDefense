@@ -148,16 +148,17 @@ def main(args):
                 input_tensor = data["input_values"].to(device_id)
                 padding_masks = data["padding_masks"].to(device_id)
 
-                if data["full_padding_masks"] != None:
-                    full_padding_masks = data["full_padding_masks"].to(device_id)
-                else:
+                if data["full_padding_masks"]:
                     full_padding_masks = None
+                else:
+                    full_padding_masks = data["full_padding_masks"].to(device_id)
 
                 # input to the model
-                if full_padding_masks != None:
-                    result = ddp_model(input_tensor, padding_masks, full_padding_masks)
-                else:
+                if full_padding_masks:
                     result = ddp_model(input_tensor, padding_masks)
+                else:
+                    result = ddp_model(input_tensor, padding_masks, full_padding_masks)
+
 
                 # calc the loss
                 loss = loss_fn(result, input_tensor)
