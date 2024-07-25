@@ -24,7 +24,7 @@ class PatchToEmbedding(nn.Module):
     def forward(self, input_tensor):
         normalized_input = self.batch_norm(input_tensor)
         embeddings = self.conv(normalized_input)
-        return embeddings
+        return embeddings, normalized_input
 
 class EmbeddingToPatch(nn.Module):
     def __init__(self, embed_dim, out_channel, kernel=16, stride=16) -> None:
@@ -237,7 +237,7 @@ class SpectrogramMAE(nn.Module):
     def forward(self, input_tensor, padding_masks=None, full_padding_masks=None):
         # patch to embedding
         bsz, channel, height, width = input_tensor.shape
-        embeddings = self.patch_to_embedding(input_tensor)
+        embeddings, normalized_input = self.patch_to_embedding(input_tensor)
         _, embed_dim, _, _ = embeddings.shape
 
         # reshape to (bsz, seq_len, embed_dim)
@@ -283,15 +283,15 @@ class SpectrogramMAE(nn.Module):
         spectrograms = spectrograms.reshape(bsz, channel, height, width)
 
         # get the mean and std from the PatchToEmbedding module to do inverse gaussian normalization
-        mean = self.patch_to_embedding.batch_norm.running_mean
-        var = self.patch_to_embedding.batch_norm.running_var
-        eps = self.patch_to_embedding.batch_norm.eps
+        # mean = self.patch_to_embedding.batch_norm.running_mean
+        # var = self.patch_to_embedding.batch_norm.running_var
+        # eps = self.patch_to_embedding.batch_norm.eps
 
-        spectrograms = spectrograms * math.sqrt(var + eps) + mean
+        # spectrograms = spectrograms * math.sqrt(var + eps) + mean
 
         # mask out the padding part
         if full_padding_masks != None:
             spectrograms = spectrograms.masked_fill(full_padding_masks == 0, 0)
 
-        return spectrograms
+        return spectrograms, normalized_input
 
