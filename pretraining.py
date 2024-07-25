@@ -152,8 +152,7 @@ def main(args):
                     result = ddp_model(input_tensor, padding_masks)
                 elif args.model_type == "spectrogram":
                     full_padding_masks = data["full_padding_masks"].to(device_id)
-                    result, normalized_input = ddp_model(input_tensor, padding_masks, full_padding_masks)
-                    input_tensor = normalized_input
+                    result = ddp_model(input_tensor, padding_masks, full_padding_masks)
 
                 # calc the loss
                 loss = loss_fn(result, input_tensor)

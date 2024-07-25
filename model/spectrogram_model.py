@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import math
 from model.transformer_parts import Attention, TransformerBlock, SinusoidalPositionalEncoding
 import random
 
@@ -17,7 +18,7 @@ class PatchToEmbedding(nn.Module):
     def __init__(self, in_channel, embed_dim, kernel=16, stride=16) -> None:
         super(PatchToEmbedding, self).__init__()
 
-        self.batch_norm = nn.BatchNorm2d(in_channel)
+        self.batch_norm = nn.BatchNorm2d(in_channel, affine=False)
         self.conv = nn.Conv2d(in_channel, embed_dim, kernel, stride)
 
     def forward(self, input_tensor):
@@ -280,6 +281,13 @@ class SpectrogramMAE(nn.Module):
 
         # reshape back to (bsz, embed_dim, height, width)
         spectrograms = spectrograms.reshape(bsz, channel, height, width)
+
+        # get the mean and std from the PatchToEmbedding module to do inverse gaussian normalization
+        mean = self.patch_to_embedding.batch_norm.running_mean
+        var = self.patch_to_embedding.batch_norm.running_var
+        eps = self.patch_to_embedding.batch_norm.eps
+
+        spectrograms = spectrograms * math.sqrt(var + eps) + mean
 
         # mask out the padding part
         if full_padding_masks != None:
