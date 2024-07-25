@@ -17,10 +17,11 @@ class PatchToEmbedding(nn.Module):
     def __init__(self, in_channel, embed_dim, kernel=16, stride=16) -> None:
         super(PatchToEmbedding, self).__init__()
 
+        self.batch_norm = nn.BatchNorm2d(in_channel)
         self.conv = nn.Conv2d(in_channel, embed_dim, kernel, stride)
 
     def forward(self, input_tensor):
-        embeddings = self.conv(input_tensor)
+        embeddings = self.conv(self.batch_norm(input_tensor))
         return embeddings
 
 class EmbeddingToPatch(nn.Module):
