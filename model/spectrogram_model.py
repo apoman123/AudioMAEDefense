@@ -21,8 +21,9 @@ class PatchToEmbedding(nn.Module):
         self.conv = nn.Conv2d(in_channel, embed_dim, kernel, stride)
 
     def forward(self, input_tensor):
-        embeddings = self.conv(self.batch_norm(input_tensor))
-        return embeddings
+        normalized_input = self.batch_norm(input_tensor)
+        embeddings = self.conv(normalized_input)
+        return embeddings, normalized_input
 
 class EmbeddingToPatch(nn.Module):
     def __init__(self, embed_dim, out_channel, kernel=16, stride=16) -> None:
@@ -235,7 +236,7 @@ class SpectrogramMAE(nn.Module):
     def forward(self, input_tensor, padding_masks=None, full_padding_masks=None):
         # patch to embedding
         bsz, channel, height, width = input_tensor.shape
-        embeddings = self.patch_to_embedding(input_tensor)
+        embeddings, normalized_input = self.patch_to_embedding(input_tensor)
         _, embed_dim, _, _ = embeddings.shape
 
         # reshape to (bsz, seq_len, embed_dim)
@@ -284,5 +285,5 @@ class SpectrogramMAE(nn.Module):
         if full_padding_masks != None:
             spectrograms = spectrograms.masked_fill(full_padding_masks == 0, 0)
 
-        return spectrograms
+        return spectrograms, normalized_input
 
