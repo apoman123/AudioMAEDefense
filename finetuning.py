@@ -29,6 +29,7 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", default="nccl", type=str)
     # dataset configuration
+    parser.add_argument("--dataset", default="vctk", choices=["vctk", "speech_command", "esc50"])
     parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument("--batch_size", default=512, type=int)
     parser.add_argument("--accum_steps", default=0, type=int)
@@ -91,11 +92,25 @@ def main(args):
         sys.stdout = f
 
     # dataset, need to implement for specific dataset
-    training_set = load_from_disk("/home/apoman123/data/nas07/Dataset/Audio/audioset_full_training_set")
+    if args.dataset == "vctk":
+        whole_set = load_from_disk("/data/nas07/Dataset/Audio/VCTK/VCTK")
+    elif args.dataset == "speech_commands":
+        whole_set = load_dataset("google/speech_commands", "v0.02")
+    elif args.dataset == "esc50":
+        whole_set = load_dataset("ashraq/esc50")
+
+    training_set = whole_set["train"]
     training_set_sampler = DistributedSampler(training_set, shuffle=True)
     train_loader = DataLoader(training_set, sampler=training_set_sampler, batch_size=args.batch_size,
                             num_workers=args.num_workers, pin_memory=True,
                             collate_fn=collate_fn) # add collate function if needed
+    
+    evaluation_set = whole_set["validation"]
+    evaluation_set_sampler = DistributedSampler(evaluation_set)
+    eval_loader = DataLoader(evaluation_set, sampler=evaluation_set_sampler, batch_size=args.batch_size,
+                            num_workers=args.num_workers, pin_memory=True,
+                            collate_fn=collate_fn)
+        
     print(f"effective batch size is {args.batch_size * dist.get_world_size() * args.accum_steps}")
 
     # model
