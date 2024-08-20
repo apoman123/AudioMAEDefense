@@ -172,22 +172,21 @@ class WaveMAE(nn.Module):
         # cut out the rest
         groups = seq_len // 4
         rest = seq_len % 4
-        input_tensor = input_tensor[:, :seq_len - rest, :]
+        cutted_input_tensor = input_tensor[:, :seq_len - rest, :]
         rest_tensor = input_tensor[:, seq_len - rest:, :]
         cutted_token_idxes = token_idxes[:seq_len - rest]
         rest_token_idxes = token_idxes[seq_len - rest:]
-
+        
         # four tokens as a group
-        grouped_tensor = input_tensor.reshape(bsz, groups, 4, embed_dim)
+        grouped_tensor = cutted_input_tensor.reshape(bsz, groups, 4, embed_dim)
         grouped_tensor_shape = grouped_tensor.shape
         cutted_token_idxes = cutted_token_idxes.reshape(groups, 4)
         cutted_token_idxes_shape = cutted_token_idxes.shape
 
         if padding_mask != None:
-            padding_mask = padding_mask[:, :seq_len - rest]
+            cutted_padding_mask = padding_mask[:, :seq_len - rest]
             rest_padding_mask = padding_mask[:, seq_len - rest:]
-
-            padding_mask = padding_mask.reshape(bsz, groups, 4)
+            cutted_padding_mask = cutted_padding_mask.reshape(bsz, groups, 4)
 
 
         if self.masked_ratio == 0.75:
@@ -205,9 +204,9 @@ class WaveMAE(nn.Module):
             cutted_token_idxes = torch.masked_select(cutted_token_idxes, select_mask)
 
             if padding_mask != None:
-                select_mask = torch.zeros(padding_mask.shape).bool()
+                select_mask = torch.zeros(cutted_padding_mask.shape).bool()
                 select_mask[:, :, idx] = True
-                padding_mask = torch.masked_select(padding_mask, select_mask)
+                cutted_padding_mask = torch.masked_select(cutted_padding_mask, select_mask)
 
         elif self.masked_ratio == 0.50:
             # choose 2 token to preserve from every group with the same relative idx in every group
@@ -227,10 +226,10 @@ class WaveMAE(nn.Module):
             cutted_token_idxes = torch.masked_select(cutted_token_idxes, select_mask)
 
             if padding_mask != None:
-                select_mask = torch.zeros(padding_mask.shape).bool()
+                select_mask = torch.zeros(cutted_padding_mask.shape).bool()
                 select_mask[:, :, idx1]= True
                 select_mask[:, :, idx2]= True
-                padding_mask = torch.masked_select(padding_mask, select_mask)
+                cutted_padding_mask = torch.masked_select(cutted_padding_mask, select_mask)
 
         elif self.masked_ratio == 0.25:
             # choose a token to discard from every group with the same relative idx in every group
@@ -247,23 +246,27 @@ class WaveMAE(nn.Module):
             cutted_token_idxes = torch.masked_select(cutted_token_idxes, select_mask)
 
             if padding_mask != None:
-                select_mask = torch.ones(padding_mask.shape).bool()
+                select_mask = torch.ones(cutted_padding_mask.shape).bool()
                 select_mask[:, :, idx] = False
-                padding_mask = torch.masked_select(padding_mask, select_mask)
+                cutted_padding_mask = torch.masked_select(cutted_padding_mask, select_mask)
 
         # reshape back
         masked_tokens = grouped_tensor.reshape(bsz, -1, embed_dim)
         cutted_token_idxes = cutted_token_idxes.reshape(-1)
+
         if padding_mask != None:
-            padding_mask = padding_mask.reshape(bsz, -1)
+            cutted_padding_mask = cutted_padding_mask.reshape(bsz, -1)
 
         # concat the rest
         masked_tokens = torch.cat([masked_tokens, rest_tensor], dim=1)
-        token_idxes = torch.cat([cutted_token_idxes, rest_token_idxes], dim=1)
-        if padding_mask != None:
-            padding_mask = torch.cat([padding_mask, rest_padding_mask], dim=1)
+        token_idxes = torch.cat([cutted_token_idxes, rest_token_idxes], dim=0)
 
-        return masked_tokens, token_idxes, seq_len, padding_mask
+        if padding_mask != None:
+            cutted_padding_mask = torch.cat([cutted_padding_mask, rest_padding_mask], dim=1)
+        else:
+            cutted_padding_mask = None
+
+        return masked_tokens, token_idxes, seq_len, cutted_padding_mask
 
     def add_masked_tokens_and_unshuffle(self, shuffled_tokens, token_order):
         bsz, seq_len, embed_dim = shuffled_tokens.shape
@@ -284,12 +287,13 @@ class WaveMAE(nn.Module):
         # get full token idxes
         bsz, _, _ = input_tensor.shape
         full_token_idxes = torch.arange(seq_len)
+        masked_token = self.masked_token.expand(bsz, -1, -1)
 
         # append token to input tensor if the original tensor is a mask
         for element in full_token_idxes:
             if not element in token_idxes:
-                token_idxes = torch.cat([token_idxes, element])
-                input_tensor = torch.cat([input_tensor, self.masked_token], dim=1)
+                token_idxes = torch.cat([token_idxes, torch.tensor([element]).to(token_idxes.device)], dim=0)
+                input_tensor = torch.cat([input_tensor, masked_token], dim=1)
 
         # unshuffle the tokens
         sorted_idxes = torch.sort(token_idxes).indices
@@ -309,6 +313,8 @@ class WaveMAE(nn.Module):
             shuffled_tokens, token_order, masked_padding_mask = self.random_mask(hidden_states, padding_mask)
         elif self.masking_mode == "uniform":
             shuffled_tokens, token_order, seq_len, masked_padding_mask = self.uniform_mask(hidden_states, padding_mask)
+        elif self.masking_mode == "no_mask":
+            shuffled_tokens = hidden_states
 
        
         # add cls token
@@ -324,6 +330,8 @@ class WaveMAE(nn.Module):
             tokens = self.add_masked_tokens_and_unshuffle(shuffled_tokens, token_order)
         elif self.masking_mode == "uniform":
             tokens = self.uniform_add_masked_tokens_and_unshuffle(shuffled_tokens, token_order, seq_len)
+        elif self.masking_mode == "no_mask":
+            tokens = shuffled_tokens
 
         
         # add cls token

@@ -46,7 +46,7 @@ def get_args():
 
     # training configuration
     parser.add_argument("--epochs", default=100, type=int)
-    parser.add_argument("--finetuning_task", default="masked nsm", choices=["nsm", "uniform_mask", "random_mask", "masked_nsm"])
+    parser.add_argument("--finetuning_task", default="masked_nam", choices=["nam", "uniform_mask", "random_mask", "masked_nam"])
     parser.add_argument("--lr", default=1e-5, type=float)
     parser.add_argument("--max_lr", default=2e-4, type=float)
     parser.add_argument("--save_epoch", default=1, type=int)
@@ -64,7 +64,7 @@ def collate_fn(batch):
     elif args.model_type == "spectrogram":
         padding_result = spectrogram_padding(batch)
 
-    if args.finetuning_task == "nsm" or args.finetuning_task == "masked_nsm":
+    if args.finetuning_task == "nam" or args.finetuning_task == "masked_nam":
         sigma = gamma.sample()
         padding_result["noisy_input"] = get_noisy_input(padding_result["input_values"], sigma)
 
@@ -93,7 +93,7 @@ def main(args):
 
     # dataset, need to implement for specific dataset
     if args.dataset == "vctk":
-        whole_set = load_from_disk("/data/nas07/Dataset/Audio/VCTK/VCTK")
+        whole_set = load_from_disk("/home/apoman123/data/nas04/sharedFolder/dataset/speech/VCTK/VCTK")
     elif args.dataset == "speech_commands":
         whole_set = load_dataset("google/speech_commands", "v0.02")
     elif args.dataset == "esc50":
@@ -149,7 +149,7 @@ def main(args):
         start_epoch = 0
 
     # accelerate
-    accelerator = Accelerator()
+    accelerator = Accelerator(gradient_accumulation_steps=args.accum_steps)
     ddp_model, optimizer, train_loader, scheduler = accelerator.prepare(
         model, optimizer, train_loader, scheduler
     )
@@ -193,7 +193,7 @@ def main(args):
 
                 # calc the loss
                 loss = loss_fn(result, ground_truth)
-                total_loss += loss.item()
+                total_train_loss += loss.item()
 
                 # calc the gradient
                 accelerator.backward(loss)
@@ -203,10 +203,10 @@ def main(args):
                 pbar.set_postfix(loss="{:.4f}".format(loss.item()), lr="{:.4f}".format(optimizer.param_groups[0]["lr"]))
                 pbar.update(1)
 
-                if (step+1) % args.accum_steps == 0:
-                    # update the model
-                    optimizer.step()
-                    optimizer.zero_grad()
+                # if (step+1) % args.accum_steps == 0:
+                #     # update the model
+                #     optimizer.step()
+                #     optimizer.zero_grad()
             
             total_eval_loss = 0
             ddp_model.eval()
