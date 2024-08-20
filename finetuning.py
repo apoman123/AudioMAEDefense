@@ -136,9 +136,9 @@ def main(args):
     print(f"Loss function is: {loss_fn}")
     print(f"Optimizer is: {optimizer}")
     print(f"LR Scheduler is: {scheduler}")
-
+    
     # resume
-    if args.model_path != None:
+    if args.resume == True:
         checkpoint = torch.load(args.model_path)
         start_epoch = checkpoint["epoch"]
         ddp_model.load_state_dict(checkpoint["model"])
@@ -147,6 +147,9 @@ def main(args):
         print(f"load state dict from {args.model_path} and resume training from epoch {start_epoch+1}")
     else:
         start_epoch = 0
+        checkpoint = torch.load(args.model_path)
+        ddp_model.load_state_dict(checkpoint["model"])
+        print(f"load state dict from {args.model_path} and resume training from epoch {start_epoch+1}")
 
     # accelerate
     accelerator = Accelerator(gradient_accumulation_steps=args.accum_steps)
