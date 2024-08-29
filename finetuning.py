@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
-from datasets import load_dataset, load_from_disk
+from datasets import load_dataset, load_from_disk, Audio
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.distributed import init_process_group, destroy_process_group
@@ -93,7 +93,9 @@ def main(args):
 
     # dataset, need to implement for specific dataset
     if args.dataset == "vctk":
-        whole_set = load_from_disk("/home/apoman123/data/nas04/sharedFolder/dataset/speech/VCTK/VCTK")
+        whole_set = load_from_disk("/data/nas05/apoman123/vctk_less_than_15")
+        whole_set = whole_set.cast_column("audio", Audio(sampling_rate=16000))
+        whole_set = whole_set.shuffle(seed=42).train_test_split(test_size=0.2)
     elif args.dataset == "speech_commands":
         whole_set = load_dataset("google/speech_commands", "v0.02")
     elif args.dataset == "esc50":
