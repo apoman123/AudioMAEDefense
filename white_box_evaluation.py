@@ -17,8 +17,6 @@ from tqdm import tqdm
 from transformers import SequenceFeatureExtractor
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributions.gamma import Gamma
-from art.attacks.evasion import AutoAttack
-from art.attacks.evasion.projected_gradient_descent import projected_gradient_descent
 
 
 from model.waveform_model import WaveMAE
@@ -27,6 +25,7 @@ from utils.preprocess import wave_padding, spectrogram_padding, get_noisy_input
 from model.resnet_1d import ResNet50_1D
 from model.resnet_2d import ResNet50_2D
 from model.whole_system import WholeSystem
+from attack.pgd import projected_gradient_descent
 
 # seed
 torch.manual_seed(42)
@@ -51,6 +50,7 @@ def get_args():
 
     # evaluating configuration
     parser.add_argument("--defense_model_task", default="masked_nam", choices=["nam", "uniform_mask", "random_mask", "masked_nam"])
+    parser.add_argument("--noise_level", default=50, type=int)
     parser.add_argument("--defense_model_path", default=None, type=str)
     parser.add_argument("--classifier_path", default=None, type=str)
 
@@ -58,6 +58,7 @@ def get_args():
     parser.add_argument("--budget", default=50, type=int)
     parser.add_argument("--attack_type", default="pgd", choices=["pgd", "auto_attack"], type=str)
     parser.add_argument("--epsilon", default=8/255, type=float)
+    parser.add_argument("--norm", default="inf", choices=["inf", "l1", "l2"], type=str)
 
     return parser
 
@@ -68,32 +69,11 @@ def collate_fn(batch):
     elif args.model_type == "spectrogram":
         padding_result = spectrogram_padding(batch)
 
-    if args.finetuning_task == "nam" or args.finetuning_task == "masked_nam":
-        sigma = gamma.sample()
-        padding_result["noisy_input"] = get_noisy_input(padding_result["input_values"], sigma)
-
     return padding_result
-
-
-def ddp_setup():
-   """
-   Args:
-       rank: Unique identifier of each process
-       world_size: Total number of processes
-   """
-   os.environ["MASTER_ADDR"] = "localhost"
-   os.environ["MASTER_PORT"] = "12355"
-   init_process_group(backend="nccl")
 
 def main(args):
     # device
-    rank = dist.get_rank()
-    device_id = rank % torch.cuda.device_count()
-
-    # print nothing if rank != 0
-    if rank != 0:
-        f = open(os.devnull, 'w')
-        sys.stdout = f
+    device_id = "cuda:0"
 
     # dataset, need to implement for specific dataset
     if args.dataset == "vctk":
@@ -116,7 +96,7 @@ def main(args):
                             num_workers=args.num_workers, pin_memory=True,
                             collate_fn=collate_fn)
         
-    print(f"effective batch size is {args.batch_size * dist.get_world_size() * args.accum_steps}")
+    print(f"effective batch size is {args.batch_size}")
 
     # model
     if args.model_type == "waveform":
@@ -148,28 +128,50 @@ def main(args):
     for key in classifer_checkpoint["model"]:
         new_key = key.replace("module.")
         state_dict[new_key] = defense_model_checkpoint["model"][key]
-    classifier.load_state_dict(checkpoint["model"])
+    classifier.load_state_dict(state_dict["model"])
 
     print(f"load defense model from {args.defense_model_path}")
     print(f"load classifier from {args.classifier_path}")
 
     # ddp
     wholesystem = WholeSystem(defense_model=defense_model, classifier=classifier)
-    ddp_wholesystem = DistributedDataParallel(wholesystem, device_ids=[rank], output_device=rank, find_unused_parameters=args.find_unused_parameters)
+    # ddp_wholesystem = DistributedDataParallel(wholesystem, device_ids=[rank], output_device=rank, find_unused_parameters=args.find_unused_parameters)
 
     # adversarial attack
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam()
+    if args.norm == "norm":
+        norm = np.inf
+    elif args.norm == "l1":
+        norm = 1
+    elif args.norm == "l2":
+        norm = 2
+
     if args.attack_type == "pgd":  
-        attack = projected_gradient_descent()
+        attack = ProjectedGradientDescent(
+            estimator=wholesystem,
+            norm=norm,
+            eps=args.epsilon,
+            max_iter=args.budget,
+            targeted=False,
+            batch_size=args.batch_size,
+        )
     elif args.attack_type == "auto_attack":
-        attack = AutoAttack()
+        attack = AutoAttack(
+            estimator=wholesystem,
+            norm=norm,
+            eps=args.epsilon,
+            batch_size=args.batch_size,
+            parallel=True
+        )
 
     # evaluation loop
     print(f"start evaluation!")
-    ddp_wholesystem.eval()
+    wholesystem.eval()
     with tqdm(total=len(eval_loader)) as eval_pbar:
         for step, data in enumerate(eval_loader):
+            if args.finetuning_task == "nam" or args.finetuning_task == "masked_nam":
+                sigma = gamma.sample()
+                padding_result["noisy_input"] = get_noisy_input(padding_result["input_values"], sigma)
+
             if "noisy_input" in data:
                 input_tensor = data["noisy_input"].to(device_id)
                 padding_masks = data["padding_masks"].to(device_id)
@@ -196,8 +198,7 @@ def main(args):
 if __name__ == "__main__":
     parser = get_args()
     args = parser.parse_args()
-    if args.finetuning_task == "nsm" or args.finetuning_task == "masked_nsm":
+    if args.finetuning_task == "nam" or args.finetuning_task == "masked_nam":
         gamma = Gamma(torch.tensor(25), torch.tensor(3)) # follow the implementation of NIM
-    ddp_setup()
     main(args)
     destroy_process_group()
