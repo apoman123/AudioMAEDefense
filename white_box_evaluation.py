@@ -17,7 +17,7 @@ from tqdm import tqdm
 from transformers import SequenceFeatureExtractor
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributions.gamma import Gamma
-
+from sklearn.metrics import accuracy_score
 
 from model.waveform_model import WaveMAE
 from model.spectrogram_model import SpectrogramMAE
@@ -25,7 +25,8 @@ from utils.preprocess import wave_padding, spectrogram_padding, get_noisy_input
 from model.resnet_1d import ResNet50_1D
 from model.resnet_2d import ResNet50_2D
 from model.whole_system import WholeSystem
-from attack.pgd import projected_gradient_descent
+from attack.pgd import PGD
+from attack.fakebob import FakeBob
 
 # seed
 torch.manual_seed(42)
@@ -56,19 +57,20 @@ def get_args():
 
     # attack configuration
     parser.add_argument("--budget", default=50, type=int)
-    parser.add_argument("--attack_type", default="pgd", choices=["pgd", "auto_attack"], type=str)
+    parser.add_argument("--attack_type", default="pgd", choices=["pgd", "fakebob"], type=str)
     parser.add_argument("--epsilon", default=8/255, type=float)
     parser.add_argument("--norm", default="inf", choices=["inf", "l1", "l2"], type=str)
 
     return parser
 
+def waveform_collate_fn(batch):
+    padding_result = wave_padding(batch)
+    padding_result["labels"] = [data["label"] for data in batch]
+    return padding_result
 
-def collate_fn(batch):
-    if args.model_type == "waveform":
-        padding_result = wave_padding(batch)
-    elif args.model_type == "spectrogram":
-        padding_result = spectrogram_padding(batch)
-
+def spectrogram_collate_fn(batch):
+    padding_result = spectrogram_padding(batch)
+    padding_result["labels"] = [data["label"] for data in batch]
     return padding_result
 
 def main(args):
@@ -78,23 +80,46 @@ def main(args):
     # dataset, need to implement for specific dataset
     if args.dataset == "vctk":
         whole_set = load_from_disk("/data/nas05/apoman123/vctk_less_than_15")
+        labels = whole_set.unique("speaker_id")['VCTK']
+        classes = len(labels)
         whole_set = whole_set.cast_column("audio", Audio(sampling_rate=16000))
         whole_set = whole_set.shuffle(seed=42).train_test_split(test_size=0.2)
-        classes = 110
+        
+        # rename speaker_id column to label
+        whole_set = whole_set.rename_column("speaker_id", "label")
+
+        # speaker to label dict
+        label_dict = {}
+        for id, speaker in enumerate(labels):
+            label_dict[speaker] = id
 
     elif args.dataset == "speech_commands":
         whole_set = load_dataset("google/speech_commands", "v0.02")
-        classes = 34
+        labels = whole_set['train'].unique("label")
+        classes = len(labels)
 
     elif args.dataset == "esc50":
         whole_set = load_dataset("ashraq/esc50")
+        whole_set = whole_set.rename_column("category", "label")
         classes = 50
+        labels = whole_set["train"].unique("label")
+
+        # category to label dict
+        label_dict = {}
+        for id, category in enumerate(labels):
+            label_dict[category] = id
+
     
     evaluation_set = whole_set["validation"]
     evaluation_set_sampler = DistributedSampler(evaluation_set)
-    eval_loader = DataLoader(evaluation_set, sampler=evaluation_set_sampler, batch_size=args.batch_size,
-                            num_workers=args.num_workers, pin_memory=True,
-                            collate_fn=collate_fn)
+    if args.model_type == "waveform":
+        eval_loader = DataLoader(evaluation_set, sampler=evaluation_set_sampler, batch_size=args.batch_size,
+                                num_workers=args.num_workers, pin_memory=True,
+                                collate_fn=waveform_collate_fn)
+    elif args.model_type == "spectrogram":
+        eval_loader = DataLoader(evaluation_set, sampler=evaluation_set_sampler, batch_size=args.batch_size,
+                                num_workers=args.num_workers, pin_memory=True,
+                                collate_fn=spectrogram_collate_fn)
         
     print(f"effective batch size is {args.batch_size}")
 
@@ -133,8 +158,7 @@ def main(args):
     print(f"load defense model from {args.defense_model_path}")
     print(f"load classifier from {args.classifier_path}")
 
-    # ddp
-    wholesystem = WholeSystem(defense_model=defense_model, classifier=classifier)
+    wholesystem = WholeSystem(defense_model=defense_model, classifier=classifier, input_type=args.model_type, noise_level=args.noise_level, defense_model_mode=args.defense_model_task)
     # ddp_wholesystem = DistributedDataParallel(wholesystem, device_ids=[rank], output_device=rank, find_unused_parameters=args.find_unused_parameters)
 
     # adversarial attack
@@ -146,59 +170,66 @@ def main(args):
         norm = 2
 
     if args.attack_type == "pgd":  
-        attack = ProjectedGradientDescent(
-            estimator=wholesystem,
-            norm=norm,
+        attack = PGD(
+            model=wholesystem,
             eps=args.epsilon,
-            max_iter=args.budget,
-            targeted=False,
-            batch_size=args.batch_size,
+            steps=args.budget,
         )
     elif args.attack_type == "auto_attack":
-        attack = AutoAttack(
-            estimator=wholesystem,
-            norm=norm,
-            eps=args.epsilon,
-            batch_size=args.batch_size,
-            parallel=True
+        attack = FakeBob(
+            model=wholesystem,
+            lr=1e-5,
+            steps=200,
+            epsilon=0.002,
+            norm_type=norm
         )
 
     # evaluation loop
     print(f"start evaluation!")
     wholesystem.eval()
+    labels = np.array([])
+    inference_result = np.array([])
+    adv_inference_result = np.array([])
     with tqdm(total=len(eval_loader)) as eval_pbar:
         for step, data in enumerate(eval_loader):
-            if args.finetuning_task == "nam" or args.finetuning_task == "masked_nam":
-                sigma = gamma.sample()
-                padding_result["noisy_input"] = get_noisy_input(padding_result["input_values"], sigma)
+            # convert data string label to numbers
+            batch_labels = []
+            for element in data['labels']:
+                batch_labels.append(label_dict[element])
+            data["labels"] = torch.tensor(batch_labels)
 
-            if "noisy_input" in data:
-                input_tensor = data["noisy_input"].to(device_id)
-                padding_masks = data["padding_masks"].to(device_id)
-                ground_truth = data["input_values"].to(device_id)
+            # generate adversarial examples
+            adv_input_data = attack(
+                data['input_values'], 
+                data['labels'], 
+                data['padding_masks'], 
+                data['full_padding_masks']
+                )
 
-            else:
-                input_tensor = data["input_values"].to(device_id)
-                padding_masks = data["padding_masks"].to(device_id)
-                ground_truth = input_tensor
-
-            if args.model_type == "waveform":
-                result = ddp_wholesystem(input_tensor, padding_masks)
-            elif args.model_type == "spectrogram":
-                full_padding_masks = data["full_padding_masks"].to(device_id)
-                result = ddp_wholesystem(input_tensor, padding_masks, full_padding_masks)
+            # input to the model
+            adv_logits = wholesystem(adv_input_data, data['padding_masks'], data['full_padding_masks'])
+            adv_classification_result = torch.argmax(adv_logits, dim=-1).cpu().numpy()
+            adv_inference_result = np.concatenate([adv_inference_result, adv_classification_result])
             
-            result.
+
+            # benign examples
+            logits = wholesystem(data['input_data'], data['padding_masks'], data['full_padding_masks'])
+            classification_result = torch.argmax(logits, dim=-1).cpu().numpy()
+            inference_result = np.concatenate([inference_result, classification_result])
+
+            labels = np.concatenate([labels, data["labels"].cpu().numpy()])
 
             # progress bar
             eval_pbar.set_description(f"Step: {step+1}/{len(eval_loader)}")
             eval_pbar.update(1)
-                
+    
+    adv_acc = accuracy_score(adv_inference_result, labels)
+    acc = accuracy_score(inference_result, labels)
+
+    print(f"the robust accuracy is: {adv_acc}")
+    print(f"the standard accuracy is: {acc} ")
 
 if __name__ == "__main__":
     parser = get_args()
     args = parser.parse_args()
-    if args.finetuning_task == "nam" or args.finetuning_task == "masked_nam":
-        gamma = Gamma(torch.tensor(25), torch.tensor(3)) # follow the implementation of NIM
     main(args)
-    destroy_process_group()

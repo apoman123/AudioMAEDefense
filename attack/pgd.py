@@ -85,6 +85,6 @@ class PGD(Attack):
 
             adv_input_data = adv_input_data.detach() + self.alpha * grad.sign()
             delta = torch.clamp(adv_input_data - input_data, min=-self.eps, max=self.eps)
-            adv_input_data = torch.clamp(input_data + delta, min=0, max=1).detach()
+            adv_input_data = (input_data + delta).detach()
 
         return adv_input_data
