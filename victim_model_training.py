@@ -18,8 +18,8 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import accuracy_score
 
 from utils.preprocess import wave_padding, spectrogram_padding, get_noisy_input
-from model.resnet_1d import ResNet50_1D
-from model.resnet_2d import ResNet50_2D
+from model.resnet_1d import ResNet50_1D, ResNet152_1D
+from model.resnet_2d import ResNet50_2D, ResNet152_2D
 
 # seed
 torch.manual_seed(42)
@@ -35,7 +35,7 @@ def get_args():
     parser.add_argument("--pin_memory", default=True, type=bool)
 
     # training configuration
-    parser.add_argument("--mode_type", default="waveform", choices=["waveform", "spectrogram"], type=str)
+    parser.add_argument("--model_type", default="waveform", choices=["waveform", "spectrogram"], type=str)
     parser.add_argument("--epochs", default=100, type=int)
     parser.add_argument("--lr", default=1e-5, type=float)
     parser.add_argument("--max_lr", default=2e-4, type=float)
@@ -81,7 +81,7 @@ def main(args):
    # dataset, need to implement for specific dataset
     if args.dataset == "vctk":
         whole_set = load_from_disk("/data/nas05/apoman123/vctk_less_than_15")
-        labels = whole_set.unique("speaker_id")['VCTK']
+        labels = whole_set.unique("speaker_id")
         classes = len(labels)
         whole_set = whole_set.cast_column("audio", Audio(sampling_rate=16000))
         whole_set = whole_set.shuffle(seed=42).train_test_split(test_size=0.2)
@@ -114,7 +114,7 @@ def main(args):
     training_set_sampler = DistributedSampler(training_set, shuffle=True)
     
     
-    evaluation_set = whole_set["validation"]
+    evaluation_set = whole_set["test"]
     evaluation_set_sampler = DistributedSampler(evaluation_set)
 
     if args.model_type == "waveform":
@@ -167,7 +167,8 @@ def main(args):
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint['scheduler'])
         print(f"load state dict from {args.model_path} and resume training from epoch {start_epoch+1}")
-
+    else:
+        start_epoch = 0
     # accelerate
     accelerator = Accelerator(gradient_accumulation_steps=args.accum_steps)
     ddp_model, optimizer, train_loader, scheduler = accelerator.prepare(
@@ -213,8 +214,8 @@ def main(args):
 
                 # get inference result
                 inference_result = torch.argmax(result, dim=-1)
-                train_inference_results = torch.cat([train_inference_results, inference_result], dim=0)
-                train_labels = torch.cat([train_labels, data["labels"]], dim=0)
+                train_inference_results = torch.cat([train_inference_results, inference_result.cpu()], dim=0)
+                train_labels = torch.cat([train_labels, data["labels"].cpu()], dim=0)
 
                 # calc the gradient
                 accelerator.backward(loss)
@@ -251,8 +252,8 @@ def main(args):
 
                     # get inference result
                     inference_result = torch.argmax(result, dim=-1)
-                    eval_inference_results = torch.cat([eval_inference_results, inference_result], dim=0)
-                    eval_labels = torch.cat([eval_labels, data["labels"]], dim=0)
+                    eval_inference_results = torch.cat([eval_inference_results, inference_result.cpu()], dim=0)
+                    eval_labels = torch.cat([eval_labels, data["labels"].cpu()], dim=0)
 
                     # progress bar
                     eval_pbar.set_description(f"Step: {step+1}/{len(eval_loader)}")
