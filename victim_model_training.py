@@ -18,7 +18,7 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import accuracy_score
 
 from utils.preprocess import wave_padding, spectrogram_padding, get_noisy_input
-from model.resnet_1d import ResNet50_1D, ResNet152_1D
+from model.rawnet3 import MainModel
 from model.resnet_2d import ResNet50_2D, ResNet152_2D
 
 # seed
@@ -129,7 +129,7 @@ def main(args):
 
     # model
     if args.model_type == "waveform":
-        model = ResNet50_1D(num_classes=classes, channels=1)
+        model = MainModel(nOut=classes, encoder_type="ECA", log_sinc=True, norm_sinc=True, out_bn=False, sinc_stride=10)
 
     elif args.model_type == "spectrogram":
         model = ResNet50_2D(num_classes=classes, channels=1)
@@ -188,20 +188,15 @@ def main(args):
 
             total_train_loss = 0
             for step, data in enumerate(train_loader):
-                # convert data string label to numbers
-                batch_labels = []
-                for element in data['labels']:
-                    batch_labels.append(label_dict[element])
-                data["labels"] = torch.tensor(batch_labels).to(device_id)# convert labels
-
                 # to devices
                 input_tensor = data['input_values'].to(device_id)
-
+                labels = data['labels'].to(device_id)
+                
                 # input to the model
                 result = ddp_model(input_tensor)
 
                 # calc the loss
-                loss = loss_fn(result, data["labels"])
+                loss = loss_fn(result, labels)
                 total_train_loss += loss.item()
 
                 # get inference result
@@ -226,20 +221,15 @@ def main(args):
             ddp_model.eval()
             with tqdm(total=len(eval_loader)) as eval_pbar:
                 for step, data in enumerate(eval_loader):
-                    # convert data string label to numbers
-                    batch_labels = []
-                    for element in data['labels']:
-                        batch_labels.append(label_dict[element])
-                    data["labels"] = torch.tensor(batch_labels).to(device_id)# convert labels
-
                     # to devices
                     input_tensor = data['input_values'].to(device_id)
+                    labels = data['labels'].to(device_id)
 
                     # input to the model
                     result = ddp_model(input_tensor)
 
                     # calc the loss
-                    loss = loss_fn(result, data["labels"])
+                    loss = loss_fn(result, labels)
                     total_eval_loss += loss.item()
 
                     # get inference result
