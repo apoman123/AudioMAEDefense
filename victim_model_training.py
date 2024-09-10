@@ -50,12 +50,12 @@ def get_args():
 
 def waveform_collate_fn(batch):
     padding_result = wave_padding(batch)
-    padding_result["labels"] = [data["label"] for data in batch]
+    padding_result["labels"] = torch.tensor([data["label"] for data in batch])
     return padding_result
 
 def spectrogram_collate_fn(batch):
     padding_result = spectrogram_padding(batch)
-    padding_result["labels"] = [data["label"] for data in batch]
+    padding_result["labels"] = torch.tensor([data["label"] for data in batch])
     return padding_result
 
 def ddp_setup():
@@ -81,18 +81,10 @@ def main(args):
    # dataset, need to implement for specific dataset
     if args.dataset == "vctk":
         whole_set = load_from_disk("/data/nas05/apoman123/vctk_less_than_15")
-        labels = whole_set.unique("speaker_id")
+        labels = whole_set.unique("label")
         classes = len(labels)
         whole_set = whole_set.cast_column("audio", Audio(sampling_rate=16000))
         whole_set = whole_set.shuffle(seed=42).train_test_split(test_size=0.2)
-        
-        # rename speaker_id column to label
-        whole_set = whole_set.rename_column("speaker_id", "label")
-
-        # speaker to label dict
-        label_dict = {}
-        for id, speaker in enumerate(labels):
-            label_dict[speaker] = id
 
     elif args.dataset == "speech_commands":
         whole_set = load_dataset("google/speech_commands", "v0.02")
