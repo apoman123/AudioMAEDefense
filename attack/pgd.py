@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from attack import Attack
+from .attack import Attack
 
 
 class PGD(Attack):
@@ -41,7 +41,7 @@ class PGD(Attack):
         r"""
         Overridden.
         """
-        input_list = []
+        input_dict = {}
         input_data = input_data.clone().detach().to(self.device)
         labels = labels.clone().detach().to(self.device)
 
@@ -59,18 +59,23 @@ class PGD(Attack):
             adv_input_data = torch.clamp(adv_input_data, min=0, max=1).detach()
 
         # append to input list
-        input_list.append(adv_input_data)
-
+        input_dict["input_values"] = adv_input_data
+        
         if padding_masks != None:
-            input_list.append(padding_masks)
+            input_dict['padding_masks'] = padding_masks 
+        else:
+            input_dict["padding_masks"] = None
         
         if full_padding_masks != None:
-            input_list.append(full_padding_masks)
+            input_dict['full_padding_masks'] = full_padding_masks 
+        else: 
+            input_dict["full_padding_masks"] = None
+            
 
 
         for _ in range(self.steps):
-            adv_input_data.requires_grad = True
-            outputs = self.get_logits(*input_list)
+            input_dict["input_values"].requires_grad = True
+            outputs = self.get_logits(input_dict)
 
             # Calculate loss
             if self.targeted:
@@ -80,11 +85,11 @@ class PGD(Attack):
 
             # Update adversarial input data
             grad = torch.autograd.grad(
-                cost, adv_input_data, retain_graph=False, create_graph=False
+                cost, input_dict["input_values"], retain_graph=False, create_graph=False, allow_unused=True
             )[0]
+            
+            input_dict["input_values"] = input_dict["input_values"].detach() + self.alpha * grad.sign()
+            delta = torch.clamp(input_dict["input_values"] - input_data, min=-self.eps, max=self.eps)
+            input_dict["input_values"] = (input_data + delta).detach()
 
-            adv_input_data = adv_input_data.detach() + self.alpha * grad.sign()
-            delta = torch.clamp(adv_input_data - input_data, min=-self.eps, max=self.eps)
-            adv_input_data = (input_data + delta).detach()
-
-        return adv_input_data
+        return input_dict["input_values"]

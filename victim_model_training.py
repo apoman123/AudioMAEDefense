@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.distributed import init_process_group, destroy_process_group
 from accelerate import Accelerator
+from accelerate.utils import DistributedDataParallelKwargs
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import accuracy_score
@@ -44,6 +45,7 @@ def get_args():
     parser.add_argument("--resume", default=False, type=bool)
     parser.add_argument("--save_path", type=str)
     parser.add_argument("--log_dir", type=str)
+    parser.add_argument("--find_unused_parameters", default=False, type=bool)
 
     return parser
 
@@ -80,7 +82,7 @@ def main(args):
 
    # dataset, need to implement for specific dataset
     if args.dataset == "vctk":
-        whole_set = load_from_disk("/data/nas05/apoman123/vctk_less_than_15")
+        whole_set = load_from_disk("/data/nas07_smb/PersonalData/apoman123/vctk_less_than_15")
         labels = whole_set.unique("label")
         classes = len(labels)
         whole_set = whole_set.cast_column("audio", Audio(sampling_rate=16000))
@@ -136,7 +138,7 @@ def main(args):
 
     model.to(device_id)
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    ddp_model = DistributedDataParallel(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+    ddp_model = DistributedDataParallel(model, device_ids=[rank], output_device=rank, find_unused_parameters=args.find_unused_parameters)
 
     print(f"Model is: {model}")
 
@@ -144,8 +146,8 @@ def main(args):
     lr = args.lr
     epochs = args.epochs
     loss_fn = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=5e-5)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=len(train_loader)*8, eta_min=5e-6)
 
     print(f"Loss function is: {loss_fn}")
     print(f"Optimizer is: {optimizer}")
@@ -162,34 +164,33 @@ def main(args):
     else:
         start_epoch = 0
     # accelerate
-    accelerator = Accelerator(gradient_accumulation_steps=args.accum_steps)
-    ddp_model, optimizer, train_loader, scheduler = accelerator.prepare(
-        model, optimizer, train_loader, scheduler
-    )
+    # kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    # accelerator = Accelerator(gradient_accumulation_steps=args.accum_steps, kwargs_handlers=[kwargs])
+    # ddp_model, optimizer, train_loader, scheduler = accelerator.prepare(
+    #     model, optimizer, train_loader, scheduler
+    # )
 
     # summary writer
     if rank == 0:
         writer = SummaryWriter(log_dir=args.log_dir)
 
     # training loop
-    ddp_model.train()
-
-    train_labels = torch.tensor([])
-    eval_labels = torch.tensor([])
-    train_inference_results = torch.tensor([])
-    eval_inference_results = torch.tensor([])
-
     print(f"start training model for {epochs}")
     with tqdm(total=len(train_loader) * epochs) as pbar:
         for epoch in range(start_epoch, epochs):
             if start_epoch != 0 and args.resume:
                 args.resume = False
                 pbar.update((start_epoch+1)*len(train_loader))
-
+                
+            ddp_model.train()
+            train_labels = torch.tensor([])
+            eval_labels = torch.tensor([])
+            train_inference_results = torch.tensor([])
+            eval_inference_results = torch.tensor([])
             total_train_loss = 0
             for step, data in enumerate(train_loader):
                 # to devices
-                input_tensor = data['input_values'].to(device_id)
+                input_tensor = data['input_values'].squeeze(1).to(device_id)
                 labels = data['labels'].to(device_id)
                 
                 # input to the model
@@ -205,8 +206,15 @@ def main(args):
                 train_labels = torch.cat([train_labels, data["labels"].cpu()], dim=0)
 
                 # calc the gradient
-                accelerator.backward(loss)
-
+                loss.backward()
+                
+                # step the scheduler
+                scheduler.step()
+                
+                if (step+1) % args.accum_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    
                 # progress bar
                 pbar.set_description(f"Epoch: {epoch+1}/{epochs} | Step: {step+1}/{len(train_loader)}")
                 pbar.set_postfix(loss="{:.4f}".format(loss.item()), lr="{:.4f}".format(optimizer.param_groups[0]["lr"]))
@@ -222,7 +230,7 @@ def main(args):
             with tqdm(total=len(eval_loader)) as eval_pbar:
                 for step, data in enumerate(eval_loader):
                     # to devices
-                    input_tensor = data['input_values'].to(device_id)
+                    input_tensor = data['input_values'].squeeze(1).to(device_id)
                     labels = data['labels'].to(device_id)
 
                     # input to the model
@@ -241,10 +249,6 @@ def main(args):
                     eval_pbar.set_description(f"Step: {step+1}/{len(eval_loader)}")
                     eval_pbar.update(1)
                 
-
-
-            # step the scheduler
-            scheduler.step()
 
             if (epoch+1) % args.save_epoch == 0:
                 checkpoint = {

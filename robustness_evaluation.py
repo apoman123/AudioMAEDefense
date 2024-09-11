@@ -22,7 +22,7 @@ from sklearn.metrics import accuracy_score
 from model.waveform_model import WaveMAE
 from model.spectrogram_model import SpectrogramMAE
 from utils.preprocess import wave_padding, spectrogram_padding, get_noisy_input
-from model.resnet_1d import ResNet50_1D
+from model.rawnet3 import MainModel
 from model.resnet_2d import ResNet50_2D
 from model.whole_system import WholeSystem
 from attack.pgd import PGD
@@ -65,33 +65,30 @@ def get_args():
 
 def waveform_collate_fn(batch):
     padding_result = wave_padding(batch)
-    padding_result["labels"] = [data["label"] for data in batch]
+    padding_result["labels"] = torch.tensor([data["label"] for data in batch])
     return padding_result
 
 def spectrogram_collate_fn(batch):
     padding_result = spectrogram_padding(batch)
-    padding_result["labels"] = [data["label"] for data in batch]
+    padding_result["labels"] = torch.tesnor([data["label"] for data in batch])
     return padding_result
 
 def main(args):
     # device
-    device_id = "cuda:0"
+    device_id = "0"
+    if torch.cuda.is_available():
+        device = f"cuda:{device_id}"
+    else:
+        device = "cpu"
+    print(f"using {device}")
 
     # dataset, need to implement for specific dataset
     if args.dataset == "vctk":
-        whole_set = load_from_disk("/data/nas05/apoman123/vctk_less_than_15")
-        labels = whole_set.unique("speaker_id")['VCTK']
+        whole_set = load_from_disk("/data/nas07_smb/PersonalData/apoman123/vctk_less_than_15")
+        labels = whole_set.unique("label")
         classes = len(labels)
         whole_set = whole_set.cast_column("audio", Audio(sampling_rate=16000))
         whole_set = whole_set.shuffle(seed=42).train_test_split(test_size=0.2)
-        
-        # rename speaker_id column to label
-        whole_set = whole_set.rename_column("speaker_id", "label")
-
-        # speaker to label dict
-        label_dict = {}
-        for id, speaker in enumerate(labels):
-            label_dict[speaker] = id
 
     elif args.dataset == "speech_commands":
         whole_set = load_dataset("google/speech_commands", "v0.02")
@@ -104,20 +101,14 @@ def main(args):
         classes = 50
         labels = whole_set["train"].unique("label")
 
-        # category to label dict
-        label_dict = {}
-        for id, category in enumerate(labels):
-            label_dict[category] = id
-
     
-    evaluation_set = whole_set["validation"]
-    evaluation_set_sampler = DistributedSampler(evaluation_set)
+    evaluation_set = whole_set["test"]
     if args.model_type == "waveform":
-        eval_loader = DataLoader(evaluation_set, sampler=evaluation_set_sampler, batch_size=args.batch_size,
+        eval_loader = DataLoader(evaluation_set, batch_size=args.batch_size,
                                 num_workers=args.num_workers, pin_memory=True,
                                 collate_fn=waveform_collate_fn)
     elif args.model_type == "spectrogram":
-        eval_loader = DataLoader(evaluation_set, sampler=evaluation_set_sampler, batch_size=args.batch_size,
+        eval_loader = DataLoader(evaluation_set, batch_size=args.batch_size,
                                 num_workers=args.num_workers, pin_memory=True,
                                 collate_fn=spectrogram_collate_fn)
         
@@ -127,7 +118,7 @@ def main(args):
     if args.model_type == "waveform":
         defense_model = WaveMAE(middle_channel=args.middle_channel, embed_dim=args.embed_dim, num_heads=args.num_heads,
                         depth=args.depth, masking_mode=args.masking_mode, masked_ratio=args.masked_ratio)
-        classifier = ResNet50_1D(num_classes=classes)
+        classifier = MainModel(nOut=classes, encoder_type="ECA", log_sinc=True, norm_sinc=True, out_bn=False, sinc_stride=10)
 
     elif args.model_type == "spectrogram":
         defense_model = SpectrogramMAE(embed_dim=args.embed_dim, num_heads=args.num_heads, depth=args.depth,
@@ -141,24 +132,24 @@ def main(args):
     print(f"Classifier is: {classifier}") 
 
     # load model
-    defense_model_checkpoint = torch.load(args.defense_model_path, map_location=f"cuda:{device_id}")
+    defense_model_checkpoint = torch.load(args.defense_model_path, map_location=device)
     state_dict = {}
     for key in defense_model_checkpoint["model"]:
-        new_key = key.replace("module.")
+        new_key = key.replace("module.", "")
         state_dict[new_key] = defense_model_checkpoint["model"][key]
     defense_model.load_state_dict(state_dict)
 
-    classifer_checkpoint = torch.load(args.classifier_path, map_location=f"cuda:{device_id}")
+    classifier_checkpoint = torch.load(args.classifier_path, map_location=device)
     state_dict = {}
-    for key in classifer_checkpoint["model"]:
-        new_key = key.replace("module.")
-        state_dict[new_key] = defense_model_checkpoint["model"][key]
-    classifier.load_state_dict(state_dict["model"])
+    for key in classifier_checkpoint["model"]:
+        new_key = key.replace("module.", "")
+        state_dict[new_key] = classifier_checkpoint["model"][key]
+    classifier.load_state_dict(state_dict)
 
     print(f"load defense model from {args.defense_model_path}")
     print(f"load classifier from {args.classifier_path}")
 
-    wholesystem = WholeSystem(defense_model=defense_model, classifier=classifier, input_type=args.model_type, noise_level=args.noise_level, defense_model_mode=args.defense_model_task)
+    wholesystem = WholeSystem(defense_model=defense_model, classifier=classifier, input_type=args.model_type, noise_level=args.noise_level, defense_model_mode=args.defense_model_task).to(device)
     # ddp_wholesystem = DistributedDataParallel(wholesystem, device_ids=[rank], output_device=rank, find_unused_parameters=args.find_unused_parameters)
 
     # adversarial attack
@@ -192,20 +183,23 @@ def main(args):
     adv_inference_result = np.array([])
     with tqdm(total=len(eval_loader)) as eval_pbar:
         for step, data in enumerate(eval_loader):
-            # convert data string label to numbers
-            batch_labels = []
-            for element in data['labels']:
-                batch_labels.append(label_dict[element])
-            data["labels"] = torch.tensor(batch_labels)
+            # to device
+            data['input_values'] = data['input_values'].to(device)
+            data['labels'] = data['labels'].to(device)
 
+            if data['padding_masks'] != None:
+                data['padding_masks'] = data['padding_masks'].to(device)
+
+            if data['full_padding_masks'] != None:
+                data['full_padding_masks'] = data['full_padding_masks'].to(device)
+                
             # generate adversarial examples
             adv_input_data = attack(
                 data['input_values'], 
                 data['labels'], 
                 data['padding_masks'], 
                 data['full_padding_masks']
-                )
-
+            )
             # input to the model
             adv_logits = wholesystem(adv_input_data, data['padding_masks'], data['full_padding_masks'])
             adv_classification_result = torch.argmax(adv_logits, dim=-1).cpu().numpy()
@@ -213,7 +207,7 @@ def main(args):
             
 
             # benign examples
-            logits = wholesystem(data['input_data'], data['padding_masks'], data['full_padding_masks'])
+            logits = wholesystem(data['input_values'], data['padding_masks'], data['full_padding_masks'])
             classification_result = torch.argmax(logits, dim=-1).cpu().numpy()
             inference_result = np.concatenate([inference_result, classification_result])
 

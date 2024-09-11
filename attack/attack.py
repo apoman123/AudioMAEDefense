@@ -76,7 +76,7 @@ class Attack(object):
     def get_logits(self, inputs, labels=None, *args, **kwargs):
         if self._normalization_applied is False:
             inputs = self.normalize(inputs)
-        logits = self.model(**inputs)
+        logits = self.model(inputs["input_values"], inputs["padding_masks"], inputs["full_padding_masks"])
         return logits
 
     @wrapper_method
