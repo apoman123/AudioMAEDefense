@@ -11,7 +11,7 @@ from torch.nn.parallel import DistributedDataParallel
 from datasets import load_dataset, load_from_disk, Audio
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.distributed import init_process_group, destroy_process_group
+from torch.distributed import init_process_group, destroy_process_group, send, gather
 from accelerate import Accelerator
 from tqdm import tqdm
 from transformers import SequenceFeatureExtractor
@@ -60,6 +60,10 @@ def get_args():
     parser.add_argument("--attack_type", default="pgd", choices=["pgd", "fakebob"], type=str)
     parser.add_argument("--epsilon", default=8/255, type=float)
     parser.add_argument("--norm", default="inf", choices=["inf", "l1", "l2"], type=str)
+    parser.add_argument("--adv_inf_results_path", type=str)
+    parser.add_argument("--benign_inf_results_path", type=str)
+    parser.add_argument("--find_unused_parameters", default=False, type=bool)
+    parser.add_argument("--task_label_path", type=str)
 
     return parser
 
@@ -73,14 +77,31 @@ def spectrogram_collate_fn(batch):
     padding_result["labels"] = torch.tesnor([data["label"] for data in batch])
     return padding_result
 
+def ddp_setup():
+   """
+   Args:
+       rank: Unique identifier of each process
+       world_size: Total number of processes
+   """
+   os.environ["MASTER_ADDR"] = "localhost"
+   os.environ["MASTER_PORT"] = "12355"
+   init_process_group(backend="nccl")
+
 def main(args):
     # device
-    device_id = "0"
-    if torch.cuda.is_available():
-        device = f"cuda:{device_id}"
-    else:
-        device = "cpu"
-    print(f"using {device}")
+    rank = dist.get_rank()
+    device_id = rank % torch.cuda.device_count()
+
+    # print nothing if rank != 0
+    if rank != 0:
+        f = open(os.devnull, 'w')
+        sys.stdout = f
+    # device_id = "0"
+    # if torch.cuda.is_available():
+    #     device = f"cuda:{device_id}"
+    # else:
+    #     device = "cpu"
+    # print(f"using {device}")
 
     # dataset, need to implement for specific dataset
     if args.dataset == "vctk":
@@ -103,12 +124,13 @@ def main(args):
 
     
     evaluation_set = whole_set["test"]
+    sampler = DistributedSampler(evaluation_set)
     if args.model_type == "waveform":
-        eval_loader = DataLoader(evaluation_set, batch_size=args.batch_size,
+        eval_loader = DataLoader(evaluation_set, batch_size=args.batch_size, sampler=sampler,
                                 num_workers=args.num_workers, pin_memory=True,
                                 collate_fn=waveform_collate_fn)
     elif args.model_type == "spectrogram":
-        eval_loader = DataLoader(evaluation_set, batch_size=args.batch_size,
+        eval_loader = DataLoader(evaluation_set, batch_size=args.batch_size, sampler=sampler,
                                 num_workers=args.num_workers, pin_memory=True,
                                 collate_fn=spectrogram_collate_fn)
         
@@ -132,14 +154,14 @@ def main(args):
     print(f"Classifier is: {classifier}") 
 
     # load model
-    defense_model_checkpoint = torch.load(args.defense_model_path, map_location=device)
+    defense_model_checkpoint = torch.load(args.defense_model_path, map_location=f"cuda:{device_id}")
     state_dict = {}
     for key in defense_model_checkpoint["model"]:
         new_key = key.replace("module.", "")
         state_dict[new_key] = defense_model_checkpoint["model"][key]
     defense_model.load_state_dict(state_dict)
 
-    classifier_checkpoint = torch.load(args.classifier_path, map_location=device)
+    classifier_checkpoint = torch.load(args.classifier_path, map_location=f"cuda:{device_id}")
     state_dict = {}
     for key in classifier_checkpoint["model"]:
         new_key = key.replace("module.", "")
@@ -149,8 +171,14 @@ def main(args):
     print(f"load defense model from {args.defense_model_path}")
     print(f"load classifier from {args.classifier_path}")
 
-    wholesystem = WholeSystem(defense_model=defense_model, classifier=classifier, input_type=args.model_type, noise_level=args.noise_level, defense_model_mode=args.defense_model_task).to(device)
-    # ddp_wholesystem = DistributedDataParallel(wholesystem, device_ids=[rank], output_device=rank, find_unused_parameters=args.find_unused_parameters)
+    wholesystem = WholeSystem(
+        defense_model=defense_model, 
+        classifier=classifier, 
+        input_type=args.model_type, 
+        noise_level=args.noise_level, 
+        defense_model_mode=args.defense_model_task
+        ).to(f"cuda:{device_id}")
+    ddp_wholesystem = DistributedDataParallel(wholesystem, device_ids=[rank], output_device=rank, find_unused_parameters=args.find_unused_parameters)
 
     # adversarial attack
     if args.norm == "norm":
@@ -162,13 +190,13 @@ def main(args):
 
     if args.attack_type == "pgd":  
         attack = PGD(
-            model=wholesystem,
+            model=ddp_wholesystem,
             eps=args.epsilon,
             steps=args.budget,
         )
-    elif args.attack_type == "auto_attack":
+    elif args.attack_type == "fakebob":
         attack = FakeBob(
-            model=wholesystem,
+            model=ddp_wholesystem,
             lr=1e-5,
             steps=200,
             epsilon=0.002,
@@ -177,21 +205,23 @@ def main(args):
 
     # evaluation loop
     print(f"start evaluation!")
-    wholesystem.eval()
+
     labels = np.array([])
     inference_result = np.array([])
     adv_inference_result = np.array([])
+
+    wholesystem.eval()
     with tqdm(total=len(eval_loader)) as eval_pbar:
         for step, data in enumerate(eval_loader):
             # to device
-            data['input_values'] = data['input_values'].to(device)
-            data['labels'] = data['labels'].to(device)
+            data['input_values'] = data['input_values'].to(f"cuda:{device_id}")
+            data['labels'] = data['labels'].to(f"cuda:{device_id}")
 
             if data['padding_masks'] != None:
-                data['padding_masks'] = data['padding_masks'].to(device)
+                data['padding_masks'] = data['padding_masks'].to(f"cuda:{device_id}")
 
             if data['full_padding_masks'] != None:
-                data['full_padding_masks'] = data['full_padding_masks'].to(device)
+                data['full_padding_masks'] = data['full_padding_masks'].to(f"cuda:{device_id}")
                 
             # generate adversarial examples
             adv_input_data = attack(
@@ -202,28 +232,52 @@ def main(args):
             )
             # input to the model
             adv_logits = wholesystem(adv_input_data, data['padding_masks'], data['full_padding_masks'])
-            adv_classification_result = torch.argmax(adv_logits, dim=-1).cpu().numpy()
-            adv_inference_result = np.concatenate([adv_inference_result, adv_classification_result])
-            
-
+            adv_classification_result = torch.argmax(adv_logits, dim=-1)
+                
             # benign examples
             logits = wholesystem(data['input_values'], data['padding_masks'], data['full_padding_masks'])
-            classification_result = torch.argmax(logits, dim=-1).cpu().numpy()
-            inference_result = np.concatenate([inference_result, classification_result])
+            classification_result = torch.argmax(logits, dim=-1)
+            batch_labels = data['labels']
 
-            labels = np.concatenate([labels, data["labels"].cpu().numpy()])
+            # inter process comunication
+            if rank != 0:
+                gather(classification_result, dst=0)
+                gather(adv_classification_result, dst=0)
+                gather(batch_labels, dst=0)
+            else:
+                adv_result_tensors = [torch.empty_like(adv_classification_result) for _ in range(dist.get_world_size())]
+                benign_result_tensors = [torch.empty_like(classification_result) for _ in range(dist.get_world_size())]
+                batch_labels_list = [torch.empty_like(batch_labels) for _ in range(dist.get_world_size())]
+                gather(adv_classification_result, gather_list=adv_result_tensors)
+                gather(classification_result, gather_list=benign_result_tensors)
+                gather(batch_labels, gather_list=batch_labels_list)
+                for benign_result, label, adv_result in zip(benign_result_tensors, batch_labels_list, adv_result_tensors):
+                    inference_result = np.concatenate([inference_result, benign_result.cpu().numpy()])
+                    adv_inference_result = np.concatenate([adv_inference_result, adv_result.cpu().numpy()])
+                    labels = np.concatenate([labels, label.cpu().numpy()])
 
             # progress bar
             eval_pbar.set_description(f"Step: {step+1}/{len(eval_loader)}")
             eval_pbar.update(1)
-    
+
     adv_acc = accuracy_score(adv_inference_result, labels)
     acc = accuracy_score(inference_result, labels)
 
     print(f"the robust accuracy is: {adv_acc}")
     print(f"the standard accuracy is: {acc} ")
 
+    if rank == 0:
+        with open(args.adv_inf_results_path, "wb") as f:
+            np.save(f, adv_inference_result)
+
+        with open(args.benign_inf_results_path, "wb") as f:
+            np.save(f, inference_result)
+            
+        with open(args.task_label_path, "wb") as f:
+            np.save(f, labels)
+        
 if __name__ == "__main__":
     parser = get_args()
     args = parser.parse_args()
+    ddp_setup()
     main(args)
