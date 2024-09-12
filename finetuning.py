@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from datasets import load_dataset, load_from_disk, Audio
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from torch.distributed import init_process_group, destroy_process_group
 from accelerate import Accelerator
@@ -54,6 +54,8 @@ def get_args():
     parser.add_argument("--resume", default=False, type=bool)
     parser.add_argument("--save_path", type=str)
     parser.add_argument("--log_dir", type=str)
+    parser.add_argument("--use_cpu", default=False, type=bool)
+    parser.add_argument("--use_ddp", default=False, type=bool)
 
     return parser
 
@@ -81,10 +83,19 @@ def ddp_setup():
    os.environ["MASTER_PORT"] = "12355"
    init_process_group(backend="nccl")
 
-def main(args):
+def main(args, gamma):
     # device
-    rank = dist.get_rank()
-    device_id = rank % torch.cuda.device_count()
+    if args.use_ddp:
+        rank = dist.get_rank()
+    else:
+        rank = 0
+
+    if args.use_cpu == False:
+        device_id = rank % torch.cuda.device_count()
+        device = f"cuda:{device_id}"
+    else:
+        device = "cpu"
+
 
     # print nothing if rank != 0
     if rank != 0:
@@ -102,19 +113,25 @@ def main(args):
         whole_set = load_dataset("ashraq/esc50")
 
     training_set = whole_set["train"]
-    training_set_sampler = DistributedSampler(training_set, shuffle=True)
+    evaluation_set = whole_set["test"]
+
+    if args.use_ddp:
+        training_set_sampler = DistributedSampler(training_set, shuffle=True)
+        evaluation_set_sampler = DistributedSampler(evaluation_set)
+    else:
+        training_set_sampler = RandomSampler(training_set)
+        evaluation_set_sampler = SequentialSampler(evaluation_set)
+
     train_loader = DataLoader(training_set, sampler=training_set_sampler, batch_size=args.batch_size,
                             num_workers=args.num_workers, pin_memory=True,
                             collate_fn=collate_fn) # add collate function if needed
-    
-    evaluation_set = whole_set["validation"]
-    evaluation_set_sampler = DistributedSampler(evaluation_set)
     eval_loader = DataLoader(evaluation_set, sampler=evaluation_set_sampler, batch_size=args.batch_size,
                             num_workers=args.num_workers, pin_memory=True,
                             collate_fn=collate_fn)
-        
-    print(f"effective batch size is {args.batch_size * dist.get_world_size() * args.accum_steps}")
-
+    if args.use_ddp:
+        print(f"effective batch size is {args.batch_size * dist.get_world_size() * args.accum_steps}")
+    else:
+        print(f"effective batch size is {args.batch_size * args.accum_steps}")
     # model
     if args.model_type == "waveform":
         model = WaveMAE(middle_channel=args.middle_channel, embed_dim=args.embed_dim, num_heads=args.num_heads,
@@ -122,9 +139,16 @@ def main(args):
     elif args.model_type == "spectrogram":
         model = SpectrogramMAE(embed_dim=args.embed_dim, num_heads=args.num_heads, depth=args.depth,
                             masking_mode=args.masking_mode, mask_ratio=args.masked_ratio)
-    model.to(device_id)
-    model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    ddp_model = DistributedDataParallel(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+
+    model.to(device)
+
+    if args.use_ddp:
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+
+    if args.use_ddp == True:
+        ddp_model = DistributedDataParallel(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+    else:
+        ddp_model = model
 
     print(f"Model is: {model}")
 
@@ -138,20 +162,28 @@ def main(args):
     print(f"Loss function is: {loss_fn}")
     print(f"Optimizer is: {optimizer}")
     print(f"LR Scheduler is: {scheduler}")
-    
+
     # resume
     if args.resume == True:
-        checkpoint = torch.load(args.model_path)
+        checkpoint = torch.load(args.model_path, map_location=device)
         start_epoch = checkpoint["epoch"]
-        ddp_model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint['scheduler'])
         print(f"load state dict from {args.model_path} and resume training from epoch {start_epoch+1}")
     else:
         start_epoch = 0
-        checkpoint = torch.load(args.model_path)
-        ddp_model.load_state_dict(checkpoint["model"])
+        checkpoint = torch.load(args.model_path, map_location=device)
         print(f"load state dict from {args.model_path} and resume training from epoch {start_epoch+1}")
+
+    if args.use_ddp == False:
+        state_dict = {}
+        for key in checkpoint["model"]:
+            new_key = key.replace("module.", "")
+            state_dict[new_key] = checkpoint['model'][key]
+
+        ddp_model.load_state_dict(state_dict)
+    else:
+        ddp_model.load_state_dict(checkpoint["model"])
 
     # accelerate
     accelerator = Accelerator(gradient_accumulation_steps=args.accum_steps)
@@ -168,32 +200,32 @@ def main(args):
     print(f"start training model for {epochs}")
     with tqdm(total=len(train_loader) * epochs) as pbar:
         for epoch in range(start_epoch, epochs):
-            if start_epoch != 0 and args.resume:
+            if args.resume:
                 args.resume = False
                 pbar.update((start_epoch+1)*len(train_loader))
 
             total_train_loss = 0
             for step, data in enumerate(train_loader):
                 if "noisy_input" in data:
-                    input_tensor = data["noisy_input"].to(device_id)
-                    padding_masks = data["padding_masks"].to(device_id)
-                    ground_truth = data["input_values"].to(device_id)
+                    input_tensor = data["noisy_input"].to(device)
+                    padding_masks = data["padding_masks"].to(device)
+                    ground_truth = data["input_values"].to(device)
 
                 else:
-                    input_tensor = data["input_values"].to(device_id)
-                    padding_masks = data["padding_masks"].to(device_id)
+                    input_tensor = data["input_values"].to(device)
+                    padding_masks = data["padding_masks"].to(device)
                     ground_truth = input_tensor
 
                 if args.model_type == "waveform":
                     result = ddp_model(input_tensor, padding_masks)
                 elif args.model_type == "spectrogram":
-                    full_padding_masks = data["full_padding_masks"].to(device_id)
+                    full_padding_masks = data["full_padding_masks"].to(device)
                     result, normalized_input = ddp_model(input_tensor, padding_masks, full_padding_masks)
-                    
+
 
                     # recover from normalized input to regular input
-                    mean = ddp_model.module.patch_to_embedding.batch_norm.running_mean.to(device_id)
-                    var = ddp_model.module.patch_to_embedding.batch_norm.running_var.to(device_id)
+                    mean = ddp_model.module.patch_to_embedding.batch_norm.running_mean.to(device)
+                    var = ddp_model.module.patch_to_embedding.batch_norm.running_var.to(device)
                     result = result * var + mean
 
                 # calc the loss
@@ -212,31 +244,31 @@ def main(args):
                 #     # update the model
                 #     optimizer.step()
                 #     optimizer.zero_grad()
-            
+
             total_eval_loss = 0
             ddp_model.eval()
             with tqdm(total=len(eval_loader)) as eval_pbar:
                 for step, data in enumerate(eval_loader):
                     if "noisy_input" in data:
-                        input_tensor = data["noisy_input"].to(device_id)
-                        padding_masks = data["padding_masks"].to(device_id)
-                        ground_truth = data["input_values"].to(device_id)
+                        input_tensor = data["noisy_input"].to(device)
+                        padding_masks = data["padding_masks"].to(device)
+                        ground_truth = data["input_values"].to(device)
 
                     else:
-                        input_tensor = data["input_values"].to(device_id)
-                        padding_masks = data["padding_masks"].to(device_id)
+                        input_tensor = data["input_values"].to(device)
+                        padding_masks = data["padding_masks"].to(device)
                         ground_truth = input_tensor
 
                     if args.model_type == "waveform":
                         result = ddp_model(input_tensor, padding_masks)
                     elif args.model_type == "spectrogram":
-                        full_padding_masks = data["full_padding_masks"].to(device_id)
+                        full_padding_masks = data["full_padding_masks"].to(device)
                         result, normalized_input = ddp_model(input_tensor, padding_masks, full_padding_masks)
-                        
+
 
                         # recover from normalized input to regular input
-                        mean = ddp_model.module.patch_to_embedding.batch_norm.running_mean.to(device_id)
-                        var = ddp_model.module.patch_to_embedding.batch_norm.running_var.to(device_id)
+                        mean = ddp_model.module.patch_to_embedding.batch_norm.running_mean.to(device)
+                        var = ddp_model.module.patch_to_embedding.batch_norm.running_var.to(device)
                         result = result * var + mean
 
                     # calc the loss
@@ -246,7 +278,7 @@ def main(args):
                     # progress bar
                     eval_pbar.set_description(f"Step: {step+1}/{len(eval_loader)}")
                     eval_pbar.update(1)
-                
+
 
 
             # step the scheduler
@@ -259,7 +291,7 @@ def main(args):
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict()
                 }
-                torch.save(checkpoint, args.save_path + f"/{model.__class__.__name__}_epoch_{epoch+1}.pth")
+                torch.save(checkpoint, args.save_path + f"/{args.finetuning_task}_{args.masked_ratio}_{model.__class__.__name__}_epoch_{epoch+1}.pth")
 
             # record the total loss
             mean_train_loss = total_train_loss / len(train_loader)
@@ -271,8 +303,14 @@ def main(args):
 if __name__ == "__main__":
     parser = get_args()
     args = parser.parse_args()
-    if args.finetuning_task == "nsm" or args.finetuning_task == "masked_nsm":
-        gamma = Gamma(torch.tensor(25), torch.tensor(3)) # follow the implementation of NIM
-    ddp_setup()
-    main(args)
+
+    if args.finetuning_task == "nam" or args.finetuning_task == "masked_nam":
+        gamma = Gamma(torch.tensor(25.0), torch.tensor(3.0)) # follow the implementation of NIM
+    else:
+        gamma = None
+
+    if args.use_ddp:
+        ddp_setup()
+
+    main(args, gamma)
     destroy_process_group()

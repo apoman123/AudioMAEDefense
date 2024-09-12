@@ -11,7 +11,7 @@ from torch.nn.parallel import DistributedDataParallel
 from datasets import load_dataset, load_from_disk, Audio
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.distributed import init_process_group, destroy_process_group, send, gather
+from torch.distributed import init_process_group, destroy_process_group, gather
 from accelerate import Accelerator
 from tqdm import tqdm
 from transformers import SequenceFeatureExtractor
@@ -210,7 +210,7 @@ def main(args):
     inference_result = np.array([])
     adv_inference_result = np.array([])
 
-    wholesystem.eval()
+    ddp_wholesystem.eval()
     with tqdm(total=len(eval_loader)) as eval_pbar:
         for step, data in enumerate(eval_loader):
             # to device
@@ -231,11 +231,11 @@ def main(args):
                 data['full_padding_masks']
             )
             # input to the model
-            adv_logits = wholesystem(adv_input_data, data['padding_masks'], data['full_padding_masks'])
+            adv_logits = ddp_wholesystem(adv_input_data, data['padding_masks'], data['full_padding_masks'])
             adv_classification_result = torch.argmax(adv_logits, dim=-1)
                 
             # benign examples
-            logits = wholesystem(data['input_values'], data['padding_masks'], data['full_padding_masks'])
+            logits = ddp_wholesystem(data['input_values'], data['padding_masks'], data['full_padding_masks'])
             classification_result = torch.argmax(logits, dim=-1)
             batch_labels = data['labels']
 
@@ -244,20 +244,26 @@ def main(args):
                 gather(classification_result, dst=0)
                 gather(adv_classification_result, dst=0)
                 gather(batch_labels, dst=0)
+                
             else:
-                adv_result_tensors = [torch.empty_like(adv_classification_result) for _ in range(dist.get_world_size())]
-                benign_result_tensors = [torch.empty_like(classification_result) for _ in range(dist.get_world_size())]
+                classification_results = [torch.empty_like(classification_result) for _ in range(dist.get_world_size())]
+                adv_classification_results  = [torch.empty_like(adv_classification_result) for _ in range(dist.get_world_size())]
                 batch_labels_list = [torch.empty_like(batch_labels) for _ in range(dist.get_world_size())]
-                gather(adv_classification_result, gather_list=adv_result_tensors)
-                gather(classification_result, gather_list=benign_result_tensors)
+            
+                gather(classification_result, gather_list=classification_results)
+                gather(adv_classification_result, gather_list=adv_classification_results)
                 gather(batch_labels, gather_list=batch_labels_list)
-                for benign_result, label, adv_result in zip(benign_result_tensors, batch_labels_list, adv_result_tensors):
-                    inference_result = np.concatenate([inference_result, benign_result.cpu().numpy()])
-                    adv_inference_result = np.concatenate([adv_inference_result, adv_result.cpu().numpy()])
-                    labels = np.concatenate([labels, label.cpu().numpy()])
+                for result_and_label in zip(classification_results, adv_classification_results, batch_labels_list):
+                    inference_result = np.concatenate([inference_result, result_and_label[0].cpu().numpy()])
+                    adv_inference_result = np.concatenate([adv_inference_result, result_and_label[1].cpu().numpy()])
+                    labels = np.concatenate([labels, result_and_label[2].cpu().numpy()])
+
 
             # progress bar
+            current_robust_acc = accuracy_score(adv_inference_result, labels)
+            current_benign_acc = accuracy_score(inference_result, labels)
             eval_pbar.set_description(f"Step: {step+1}/{len(eval_loader)}")
+            eval_pbar.set_postfix(r_acc="{:.4f}".format(current_robust_acc), b_acc="{:.4f}".format(current_benign_acc))
             eval_pbar.update(1)
 
     adv_acc = accuracy_score(adv_inference_result, labels)
