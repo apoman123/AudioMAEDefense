@@ -4,20 +4,49 @@ from typing import Optional, Tuple
 from transformers.activations import ACT2FN
 import math
 
-class SinusoidalPositionalEncoding(nn.Module):
-    def __init__(self, embed_dim, max_length=int(1e5)):
-        super(SinusoidalPositionalEncoding, self).__init__()
-        position_encoding = torch.tensor([[pos / math.pow(10000, 2.0 * (j // 2) / embed_dim) for j in range(embed_dim)] for pos in range(embed_dim+1)]).float()
-        position_encoding[:, 0::2] = torch.sin(position_encoding[:, 0::2])
-        position_encoding[:, 1::2] = torch.cos(position_encoding[:, 1::2])
-        self.position_encoding = nn.Embedding(max_length + 1, embed_dim)
-        self.position_encoding.weight = nn.Parameter(position_encoding, requires_grad=False).float()
+# class SinusoidalPositionalEncoding(nn.Module):
+#     def __init__(self, embed_dim, max_length=int(1e9)):
+#         super(SinusoidalPositionalEncoding, self).__init__()
+#         position_encoding = torch.tensor([[pos / math.pow(10000, 2.0 * (j // 2) / embed_dim) for j in range(embed_dim)] for pos in range(embed_dim+1)]).float()
+#         position_encoding[:, 0::2] = torch.sin(position_encoding[:, 0::2])
+#         position_encoding[:, 1::2] = torch.cos(position_encoding[:, 1::2])
+#         self.position_encoding = nn.Embedding(max_length + 1, embed_dim)
+#         self.position_encoding.weight = nn.Parameter(position_encoding, requires_grad=False).float()
     
+#     def forward(self, x):
+#         N, L, D = x.shape
+#         x_pos_emb_size = torch.arange(L).expand((N, L)).to(self.position_encoding.weight.device)
+#         x = x + self.position_encoding(x_pos_emb_size)
+#         return x
+
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, embed_dim):
+        super(SinusoidalPositionalEncoding, self).__init__()
+        self.embed_dim = embed_dim
+
+    def positional_encoding(self, length):
+        """
+        :param d_model: dimension of the model
+        :param length: length of positions
+        :return: length*d_model position matrix
+        """
+        if self.embed_dim % 2 != 0:
+            raise ValueError("Cannot use sin/cos positional encoding with "
+                            "odd dim (got dim={:d})".format(self.embed_dim))
+        pe = torch.zeros(length, self.embed_dim)
+        position = torch.arange(0, length).unsqueeze(1)
+        div_term = torch.exp((torch.arange(0, self.embed_dim, 2, dtype=torch.float) *
+                            -(math.log(10000.0) / self.embed_dim)))
+        pe[:, 0::2] = torch.sin(position.float() * div_term)
+        pe[:, 1::2] = torch.cos(position.float() * div_term)
+
+        return pe
+
     def forward(self, x):
         N, L, D = x.shape
-        x_pos_emb_size = torch.arange(L).expand((N, L)).to(self.position_encoding.weight.device)
-        x = x + self.position_encoding(x_pos_emb_size)
-        return x
+        positional_embedding = self.positional_encoding(L)
+
+        return x + positional_embedding
 
 class FeedForward(nn.Module):
     def __init__(self, activation_dropout, hidden_size, intermediate_size, hidden_act, hidden_dropout):

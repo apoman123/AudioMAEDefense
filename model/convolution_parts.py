@@ -3,9 +3,9 @@ import torch.nn as nn
 from transformers.activations import ACT2FN
 
 class GroupNormConvLayer(nn.Module):
-    def __init__(self, in_channel, out_channel, kernel_size, stride, bias, hidden_act="gelu"):
+    def __init__(self, in_channel, out_channel, kernel_size, stride, padding=0, bias=True, hidden_act="gelu"):
         super(GroupNormConvLayer, self).__init__()
-        self.conv = nn.Conv1d(in_channel, out_channel, kernel_size, stride, bias=bias)
+        self.conv = nn.Conv1d(in_channel, out_channel, kernel_size, stride, padding=padding, bias=bias)
         self.activation = ACT2FN[hidden_act]
         self.layer_norm = nn.GroupNorm(out_channel, out_channel, affine=True)
 
@@ -16,10 +16,26 @@ class GroupNormConvLayer(nn.Module):
         return hidden_states
 
 
+class BatchnormConvLayer(nn.Module):
+    def __init__(self, in_channel, out_channel, kernel, stride, padding):
+        super(BatchnormConvLayer, self).__init__()
+        self.conv = nn.Conv1d(
+            in_channels=in_channel,
+            out_channels=out_channel,
+            kernel_size=kernel,
+            stride=stride,
+            padding=padding
+            )
+        self.batch_norm = nn.BatchNorm1d(out_channel)
+        self.activation = nn.Tanh()
+
+    def forward(self, input_data):
+        return self.activation(self.batch_norm(self.conv(input_data)))
+
 class ConvLayer(nn.Module):
-    def __init__(self, in_channel, out_channel, kernel_size, stride, bias, hidden_act="gelu") -> None:
+    def __init__(self, in_channel, out_channel, kernel_size, stride, bias, padding=0, hidden_act="gelu") -> None:
         super(ConvLayer, self).__init__()
-        self.conv = nn.Conv1d(in_channel, out_channel, kernel_size, stride, bias=bias)
+        self.conv = nn.Conv1d(in_channel, out_channel, kernel_size, stride, padding=padding,bias=bias)
         self.activation = ACT2FN[hidden_act]
 
     def forward(self, hidden_states):

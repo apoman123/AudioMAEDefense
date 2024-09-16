@@ -1,6 +1,7 @@
 import os
 import time
 import sys
+import random
 
 import numpy as np
 import argparse
@@ -17,10 +18,13 @@ from tqdm import tqdm
 from transformers import SequenceFeatureExtractor
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributions.gamma import Gamma
+from torchaudio.transforms import MelSpectrogram
 
 from model.waveform_model import WaveMAE
 from model.spectrogram_model import SpectrogramMAE
+from model.pqmf import PQMF
 from utils.preprocess import wave_padding, spectrogram_padding, get_noisy_input
+from utils.vocoder_loss import subband_stft_loss, Spectrogram_L1_Loss
 
 # seed
 torch.manual_seed(42)
@@ -132,13 +136,20 @@ def main(args, gamma):
         print(f"effective batch size is {args.batch_size * dist.get_world_size() * args.accum_steps}")
     else:
         print(f"effective batch size is {args.batch_size * args.accum_steps}")
+
+
     # model
     if args.model_type == "waveform":
         model = WaveMAE(middle_channel=args.middle_channel, embed_dim=args.embed_dim, num_heads=args.num_heads,
                         depth=args.depth, masking_mode=args.masking_mode, masked_ratio=args.masked_ratio)
+        pqmf = PQMF(device=device)
+        spec_l1_loss = Spectrogram_L1_Loss()
+        
     elif args.model_type == "spectrogram":
         model = SpectrogramMAE(embed_dim=args.embed_dim, num_heads=args.num_heads, depth=args.depth,
                             masking_mode=args.masking_mode, mask_ratio=args.masked_ratio)
+        MSE_loss = nn.MSELoss()
+    masking_choices = [0.25, 0.5, 0.75]
 
     model.to(device)
 
@@ -155,11 +166,9 @@ def main(args, gamma):
     # optimization
     lr = args.lr
     epochs = args.epochs
-    loss_fn = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.LinearLR(optimizer)
-
-    print(f"Loss function is: {loss_fn}")
+    # print(f"Loss function is: {loss_fn}")
     print(f"Optimizer is: {optimizer}")
     print(f"LR Scheduler is: {scheduler}")
 
@@ -206,6 +215,9 @@ def main(args, gamma):
 
             total_train_loss = 0
             for step, data in enumerate(train_loader):
+                # random select a masking ratio
+                ddp_model.module.masked_ratio = random.choice(masking_choices)
+
                 if "noisy_input" in data:
                     input_tensor = data["noisy_input"].to(device)
                     padding_masks = data["padding_masks"].to(device)
@@ -228,8 +240,18 @@ def main(args, gamma):
                     var = ddp_model.module.patch_to_embedding.batch_norm.running_var.to(device)
                     result = result * var + mean
 
-                # calc the loss
-                loss = loss_fn(result, ground_truth)
+
+                if args.model_type == "waveform":
+                    input_mb = pqmf.analysis(input_tensor)
+                    output_mb = pqmf.analysis(result)
+                    subband_loss = subband_stft_loss(input_mb, output_mb)
+                    l1_loss = spec_l1_loss(input_tensor, result)
+                    loss = subband_loss + l1_loss
+
+                elif args.model_type == "spectrogram":
+                    # calc the loss
+                    loss = MSE_loss(result, ground_truth)
+                
                 total_train_loss += loss.item()
 
                 # calc the gradient
@@ -271,8 +293,17 @@ def main(args, gamma):
                         var = ddp_model.module.patch_to_embedding.batch_norm.running_var.to(device)
                         result = result * var + mean
 
-                    # calc the loss
-                    loss = loss_fn(result, ground_truth)
+                    if args.model_type == "waveform":
+                        input_mb = pqmf.analysis(input_tensor)
+                        output_mb = pqmf.analysis(result)
+                        subband_loss = subband_stft_loss(input_mb, output_mb)
+                        l1_loss = spec_l1_loss(input_tensor, result)
+                        loss = subband_loss + l1_loss
+
+                    elif args.model_type == "spectrogram":
+                        # calc the loss
+                        loss = MSE_loss(result, ground_truth)
+                        
                     total_eval_loss += loss.item()
 
                     # progress bar
