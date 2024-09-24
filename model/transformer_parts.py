@@ -46,7 +46,7 @@ class SinusoidalPositionalEncoding(nn.Module):
         N, L, D = x.shape
         positional_embedding = self.positional_encoding(L)
 
-        return x + positional_embedding
+        return x + positional_embedding.to(x.device)
 
 class FeedForward(nn.Module):
     def __init__(self, activation_dropout, hidden_size, intermediate_size, hidden_act, hidden_dropout):

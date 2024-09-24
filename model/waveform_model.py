@@ -230,17 +230,17 @@ class WaveMAE(nn.Module):
             idx = random.randint(0, 3)
 
             # mask the tensor
-            select_mask = torch.zeros(grouped_tensor_shape).bool()
+            select_mask = torch.zeros(grouped_tensor_shape).bool().to(grouped_tensor.device)
             select_mask[:, :, idx, :] = True
             grouped_tensor = torch.masked_select(grouped_tensor, select_mask)
 
             # mask the idxes
-            select_mask = torch.zeros(cutted_token_idxes_shape).bool()
+            select_mask = torch.zeros(cutted_token_idxes_shape).bool().to(cutted_token_idxes.device)
             select_mask[:, idx] = True
             cutted_token_idxes = torch.masked_select(cutted_token_idxes, select_mask)
 
             if padding_mask != None:
-                select_mask = torch.zeros(cutted_padding_mask.shape).bool()
+                select_mask = torch.zeros(cutted_padding_mask.shape).bool().to(cutted_padding_mask.device)
                 select_mask[:, :, idx] = True
                 cutted_padding_mask = torch.masked_select(cutted_padding_mask, select_mask)
 
@@ -250,19 +250,19 @@ class WaveMAE(nn.Module):
             idx2 = random.randint(0, 3)
 
             # mask the tesnor
-            select_mask = torch.zeros(grouped_tensor_shape).bool()
+            select_mask = torch.zeros(grouped_tensor_shape).bool().to(grouped_tensor.device)
             select_mask[:, :, idx1, :] = True
             select_mask[:, :, idx2, :] = True
             grouped_tensor = torch.masked_select(grouped_tensor, select_mask)
 
             # mask the idxes
-            select_mask = torch.zeros(cutted_token_idxes_shape).bool()
+            select_mask = torch.zeros(cutted_token_idxes_shape).bool().to(cutted_token_idxes.device)
             select_mask[:, idx1] = True
             select_mask[:, idx2] = True
             cutted_token_idxes = torch.masked_select(cutted_token_idxes, select_mask)
 
             if padding_mask != None:
-                select_mask = torch.zeros(cutted_padding_mask.shape).bool()
+                select_mask = torch.zeros(cutted_padding_mask.shape).bool().to(cutted_padding_mask.device)
                 select_mask[:, :, idx1]= True
                 select_mask[:, :, idx2]= True
                 cutted_padding_mask = torch.masked_select(cutted_padding_mask, select_mask)
@@ -272,17 +272,17 @@ class WaveMAE(nn.Module):
             idx = random.randint(0, 3)
 
             # mask the tensor
-            select_mask = torch.ones(grouped_tensor_shape).bool()
+            select_mask = torch.ones(grouped_tensor_shape).bool().to(grouped_tensor.device)
             select_mask[:, :, idx, :] = False
             grouped_tensor = torch.masked_select(grouped_tensor, select_mask)
 
             # mask the idxes
-            select_mask = torch.ones(grouped_tensor_shape).bool()
+            select_mask = torch.ones(cutted_token_idxes_shape).bool().to(cutted_token_idxes.device)
             select_mask[:, idx] = False
             cutted_token_idxes = torch.masked_select(cutted_token_idxes, select_mask)
 
             if padding_mask != None:
-                select_mask = torch.ones(cutted_padding_mask.shape).bool()
+                select_mask = torch.ones(cutted_padding_mask.shape).bool().to(cutted_padding_mask.device)
                 select_mask[:, :, idx] = False
                 cutted_padding_mask = torch.masked_select(cutted_padding_mask, select_mask)
 

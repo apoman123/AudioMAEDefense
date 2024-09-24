@@ -60,7 +60,7 @@ def get_args():
     parser.add_argument("--log_dir", type=str)
     parser.add_argument("--use_cpu", default=False, type=bool)
     parser.add_argument("--use_ddp", default=False, type=bool)
-
+    parser.add_argument("--find_unused_parameters", default=False, type=bool)
     return parser
 
 
@@ -154,7 +154,7 @@ def main(args, gamma):
 
     if args.use_ddp == True:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        ddp_model = DistributedDataParallel(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+        ddp_model = DistributedDataParallel(model, device_ids=[rank], output_device=rank, find_unused_parameters=args.find_unused_parameters)
     else:
         ddp_model = model
 
