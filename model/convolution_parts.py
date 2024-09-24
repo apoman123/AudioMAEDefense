@@ -33,9 +33,9 @@ class BatchnormConvLayer(nn.Module):
         return self.activation(self.batch_norm(self.conv(input_data)))
 
 class ConvLayer(nn.Module):
-    def __init__(self, in_channel, out_channel, kernel_size, stride, bias, padding=0, hidden_act="gelu") -> None:
+    def __init__(self, in_channel, out_channel, kernel_size, stride, dilation=1, bias=True, padding=0, hidden_act="gelu") -> None:
         super(ConvLayer, self).__init__()
-        self.conv = nn.Conv1d(in_channel, out_channel, kernel_size, stride, padding=padding,bias=bias)
+        self.conv = nn.Conv1d(in_channel, out_channel, kernel_size, stride, padding=padding,bias=bias, dilation=dilation)
         self.activation = ACT2FN[hidden_act]
 
     def forward(self, hidden_states):

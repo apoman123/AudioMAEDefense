@@ -1,5 +1,6 @@
 from typing import Union
 import torch
+from torch import Tensor
 import torch.nn as nn
 import torchaudio.functional as F
 from model.convolution_parts import *
@@ -10,21 +11,34 @@ from model.vocoder import Generator
 import json
 import random
 
-KERNELS = [10,3,3,3,3,2,2]
-PADDINGS = [0,0,0,0,0,0,0]
-STRIDES = [5,2,2,2,2,2,2]
+# KERNELS = [10,3,3,3,3,2,2]
+# PADDINGS = [0,0,0,0,0,0,0]
+# STRIDES = [5,2,2,2,2,2,2]
 # KERNELS = [10,4,4,4,4,2,2,0]
 # STRIDES = [2,2,2,2,2,2,2,0]
+TCN_CHANNELS=[[1,64],[64,128],[128,256],[256,512]]
+TCN_DILATIONS=[1,3,9,27]
+TCN_PADDINGS=[1,3,9,27]
+DOWNSAMPLE_KERNELS=[11,11,3,3,3]
+DOWNSAMPLE_STRIDES=[5,5,2,2,2]
+DOWNSAMPLE_PADDINGS=[3,3,1,1,2]
 TRANSPOSE_OUTPADS = [0, 0, 0, 0, 0, 1, 1]
 RESBLOCK="1"
-UPSAMPLE_RATES=[2,2,2,2,2,2,5]
-UPSAMPLE_KERNEL_SIZES=[2,2,3,3,3,3,10]
+UPSAMPLE_RATES=[2,5,4,4]
+UPSAMPLE_KERNEL_SIZES=[16,15,4,4]
 RESBLOCK_KERNEL_SIZES=[3, 7, 11]
 RESBLOCK_DILATION_SIZES=[[1,3,5], [1,3,5], [1,3,5]]
+RESBLOCK_INITIAL_CHANNEL=256
+REDUCTION_RATE=2
+NUM_MELS=80
+POSTNET_KERNELS=[5,5,5,5,5]
+POSTNET_STRIDES=[1,1,1,1,1]
+POSTNET_PADDINGS=[2,2,2,2,2]
+POSTNET_CHANNELS=[[80, 256], [256, 256], [256, 256], [256, 256], [256, 80]]
 IN_CHANNEL=1
 OUT_CHANNEL=512
 DROPOUT = 0.1
-TRANSFORMER_BLOCK_DEPTH = 12
+TRANSFORMER_BLOCK_DEPTH = 8
 SAMPLING_RATE = 16000
 MAX_SPEECH_POSITIONS = 16000 * 30
 PAD_TOKEN_ID=1
@@ -33,20 +47,23 @@ EOS_TOKEN_ID=2
 
 
 class FeatureEncoder(nn.Module):
-    def __init__(self, in_cahnnel, out_channel, kernels, strides, paddings, bias) -> None:
+    def __init__(self, out_channels, tcn_channels, tcn_dilations, tcn_paddings,
+                 downsample_kernels, downsample_strides, downsample_paddings, bias=True) -> None:
         super(FeatureEncoder, self).__init__()
-        self.kernels = kernels[:]
-        self.strides = strides[:]
-        self.paddings = paddings[:]
-        self.group_norm_conv = GroupNormConvLayer(in_cahnnel, out_channel, kernels[0], strides[0], paddings[0], bias)
-        copied_kernels = kernels[:]
-        copied_strides = strides[:]
-        copied_paddings = paddings[:]
-        del copied_kernels[0]
-        del copied_strides[0]
-        del copied_paddings[0]
-        self.feature_extractor = nn.ModuleList([
-            ConvLayer(out_channel, out_channel, kernel, stride, bias, padding) for (kernel, stride, padding) in zip(copied_kernels, copied_strides, copied_paddings)
+        self.tcn_channels = tcn_channels
+        self.tcn_dilations = tcn_dilations
+        self.tcn_paddings = tcn_paddings
+        self.downsample_kernels = downsample_kernels
+        self.downsample_strides = downsample_strides
+        self.downsample_paddings = downsample_paddings
+
+        self.tcns = nn.ModuleList([
+            ConvLayer(channels[0], channels[1], 3, 1, dilation, padding=padding) for (channels, dilation, padding) in zip(self.tcn_channels, self.tcn_dilations, self.tcn_paddings)
+        ])
+
+        self.convs = nn.ModuleList([
+            ConvLayer(out_channels, out_channels, kernel, stride, padding=padding) 
+            for (kernel, stride, padding) in zip(self.downsample_kernels, self.downsample_strides, self.downsample_paddings)
         ])
 
     # Copied from transformers.models.unispeech.modeling_unispeech.UniSpeechPreTrainedModel._get_feature_vector_padding_mask
@@ -76,16 +93,17 @@ class FeatureEncoder(nn.Module):
             # from https://pytorch.org/docs/stable/generated/torch.nn.Conv1d.html
             return torch.div(input_length + 2 * padding - kernel_size, stride, rounding_mode="floor") + 1
 
-        for kernel_size, stride in zip(self.kernels, self.strides, ):
-            input_lengths = _conv_out_length(input_lengths, kernel_size, stride)
+        for kernel_size, stride, padding in zip(self.down_sample_kernels, self.down_sample_strides, self.down_sample_paddings):
+            input_lengths = _conv_out_length(input_lengths, kernel_size, stride, padding)
 
         return input_lengths
 
     def forward(self, hidden_states, padding_mask=None):
-        hidden_states = self.group_norm_conv(hidden_states)
+        for tcn in self.tcns:
+            hidden_states = tcn(hidden_states)
 
-        for block in self.feature_extractor:
-            hidden_states = block(hidden_states)
+        for conv in self.convs:
+            hidden_states = conv(hidden_states)
 
         if padding_mask != None:
             padding_mask = self._get_feature_vector_padding_mask(hidden_states.shape[2], padding_mask)
@@ -144,62 +162,21 @@ class Decoder(nn.Module):
 #         wave = self.output_conv(hidden_states)
 #         return wave
 
-# class DecoderPostnet(nn.Module):
-#     def __init__(self, hidden_size, num_mel_bins, reduction_factor, kenrels, strides, paddings, postnet_conv_channels):
-#         super().__init__()
-#         self.num_mel_bins = num_mel_bins
-#         self.feat_out = nn.Linear(hidden_size, num_mel_bins * reduction_factor)
-#         self.prob_out = nn.Linear(hidden_size, reduction_factor)
-
-#         self.layers = nn.ModuleList(
-#             [
-#                 BatchnormConvLayer(
-#                     channels[0], 
-#                     channels[1],
-#                     kernel,
-#                     stride,
-#                     padding
-#                     ) 
-#                     for (channels, kernel, stride, padding) in zip(postnet_conv_channels, kenrels, strides, paddings)]
-#         )
-
-#     def forward(self, hidden_states: torch.Tensor):
-#         outputs_before_postnet = self.feat_out(hidden_states).view(hidden_states.size(0), -1, self.num_mel_bins)
-#         outputs_after_postnet = self.postnet(outputs_before_postnet)
-#         logits = self.prob_out(hidden_states).view(hidden_states.size(0), -1)
-#         return outputs_before_postnet, outputs_after_postnet, logits
-
-#     def postnet(self, hidden_states: torch.Tensor):
-#         layer_output = hidden_states.transpose(1, 2)
-#         for layer in self.layers:
-#             layer_output = layer(layer_output)
-#         return hidden_states + layer_output.transpose(1, 2)
 
 class WaveMAE(nn.Module):
     def __init__(self, in_channel=1, middle_channel=512, embed_dim=768,
-                 num_heads=16, kernels=KERNELS, strides=STRIDES, paddings=PADDINGS,
-                 upsample_rates=UPSAMPLE_RATES, upsample_kernel_sizes=UPSAMPLE_KERNEL_SIZES,
-                 resblock=RESBLOCK, resblock_kernel_sizes=RESBLOCK_KERNEL_SIZES, resblock_dilation_sizes=RESBLOCK_DILATION_SIZES, transpose_outpads=reversed(TRANSPOSE_OUTPADS),
-                 bias=True, dropout=DROPOUT, depth=12,
+                 num_heads=16, downsample_kernels=DOWNSAMPLE_KERNELS, downsample_strides=DOWNSAMPLE_STRIDES, downsample_paddings=DOWNSAMPLE_PADDINGS,
+                 num_mels=NUM_MELS, bias=True, dropout=DROPOUT, depth=12, tcn_channels=TCN_CHANNELS, tcn_dilations=TCN_DILATIONS, tcn_paddings=TCN_PADDINGS,
                  masking_mode="random", masked_ratio=0.8) -> None:
         super(WaveMAE, self).__init__()
         self.masked_ratio = masked_ratio
-        self.prenet = FeatureEncoder(in_channel, middle_channel, kernels, strides, paddings, bias)
+        self.prenet = FeatureEncoder(middle_channel, tcn_channels, tcn_dilations, tcn_paddings, downsample_kernels, downsample_strides, downsample_paddings)
         self.in_feature_projection = nn.Conv1d(middle_channel, embed_dim, 1, 1)
         self.pos_embeding = SinusoidalPositionalEncoding(embed_dim)
         self.encoder = Encoder(embed_dim, num_heads, dropout, bias, depth)
         self.decoder = Decoder(embed_dim, num_heads, dropout, bias, depth)
-        self.out_feature_projection = nn.Conv1d(embed_dim, middle_channel, 1, 1)
+        self.out_feature_projection = nn.Conv1d(embed_dim, num_mels, 1, 1)
 
-        self.postnet = Generator(
-            resblock_kernel_sizes=resblock_kernel_sizes,
-            resblock_dilation_sizes=resblock_dilation_sizes,
-            transpose_outpads=transpose_outpads,
-            upsample_rates=upsample_rates, 
-            upsample_kernel_sizes=upsample_kernel_sizes,
-            upsample_initial_channel=middle_channel,
-            resblock=resblock
-        )
 
         self.masked_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
@@ -212,7 +189,7 @@ class WaveMAE(nn.Module):
         shuffled_tokens = input_tensor[:, token_order, :]
 
         # take some tokens out as masked tokens
-        shuffled_tokens = shuffled_tokens[:, :int(seq_len*self.masked_ratio), :]
+        shuffled_tokens = shuffled_tokens[:, :int(seq_len - seq_len*self.masked_ratio), :]
 
         # deal with padding mask
         if padding_mask != None:
@@ -400,20 +377,18 @@ class WaveMAE(nn.Module):
 
         # decode
         hidden_states = self.decoder(tokens, padding_mask=padding_mask)[:, 1:, :].transpose(1, 2)
-        hidden_states = self.out_feature_projection(hidden_states)
+        spectrogram = self.out_feature_projection(hidden_states)
 
-        # convert token to wave
-        wave = self.postnet(hidden_states)
         
         # resample input to 16000hz (hifigan default is 22050hz)
         # wave = F.resample(wave, orig_freq=22050, new_freq=16000)
 
         # mask out the padding part
-        if full_padding_mask != None:
-            full_padding_mask = full_padding_mask.unsqueeze(1)
-            wave = wave.masked_fill(full_padding_mask == 0, 0)
+        # if full_padding_mask != None:
+        #     full_padding_mask = full_padding_mask.unsqueeze(1)
+        #     wave = wave.masked_fill(full_padding_mask == 0, 0)
 
-        return wave
+        return spectrogram
 
 
 

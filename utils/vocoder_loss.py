@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from torchaudio.transforms import Spectrogram
+from torchaudio.transforms import Spectrogram, MelSpectrogram
 
 def stft(x, fft_size, hop_size, win_length, window):
     """Perform STFT and convert to magnitude spectrogram.
@@ -13,7 +13,7 @@ def stft(x, fft_size, hop_size, win_length, window):
     Returns:
         Tensor: Magnitude spectrogram (B, #frames, fft_size // 2 + 1).
     """
-    x_stft = torch.stft(x, fft_size, hop_size, win_length, window.to(x.device))
+    x_stft = torch.stft(x, fft_size, hop_size, win_length, window.to(x.device), return_complex=False)
     real = x_stft[..., 0]
     imag = x_stft[..., 1]
 
@@ -166,15 +166,14 @@ def subband_stft_loss(y_mb, y_hat_mb, fft_sizes=[384, 683, 171], hop_sizes=[30, 
   sub_sc_loss, sub_mag_loss = sub_stft_loss(y_hat_mb[:, :y_mb.size(-1)], y_mb)
   return sub_sc_loss+sub_mag_loss
 
-class Spectrogram_L1_Loss(nn.Module):
-    def __init__(self, n_fft, hop_length, win_length):
+class Spectrogram_L1_Loss(torch.nn.Module):
+    def __init__(self, sample_rate, num_mels, n_fft, hop_length, win_length):
         super(Spectrogram_L1_Loss, self).__init__()
 
-        self.transform = Spectrogram(n_fft=n_fft, win_length=win_length, hop_length=hop_length)
+        self.transform = MelSpectrogram(sample_rate=sample_rate, n_mels=num_mels, n_fft=n_fft, win_length=win_length, hop_length=hop_length)
 
-    def forward(self, x, y):
+    def forward(self, x, output_spec):
         # waveform to spectrogram
-        x = self.transform(x)
-        y = self.transform(y)
-        loss = F.l1_loss(x, y)
+        x_spec = self.transform(x)
+        loss = F.l1_loss(x_spec, output_spec)
         return loss

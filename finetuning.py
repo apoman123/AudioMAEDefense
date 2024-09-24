@@ -108,9 +108,9 @@ def main(args, gamma):
 
     # dataset, need to implement for specific dataset
     if args.dataset == "vctk":
-        whole_set = load_from_disk("/data/nas05/apoman123/vctk_less_than_15")
+        whole_set = load_from_disk("/data/nas07/PersonalData/apoman123/vctk_with_speaker_label")
         whole_set = whole_set.cast_column("audio", Audio(sampling_rate=16000))
-        whole_set = whole_set.shuffle(seed=42).train_test_split(test_size=0.2)
+        whole_set = whole_set.shuffle(seed=42).train_test_split(test_size=0.1)
     elif args.dataset == "speech_commands":
         whole_set = load_dataset("google/speech_commands", "v0.02")
     elif args.dataset == "esc50":
@@ -142,8 +142,7 @@ def main(args, gamma):
     if args.model_type == "waveform":
         model = WaveMAE(middle_channel=args.middle_channel, embed_dim=args.embed_dim, num_heads=args.num_heads,
                         depth=args.depth, masking_mode=args.masking_mode, masked_ratio=args.masked_ratio)
-        pqmf = PQMF(device=device)
-        spec_l1_loss = Spectrogram_L1_Loss()
+        spec_l1_loss = Spectrogram_L1_Loss(sample_rate=16000, num_mels=80, n_fft=1024, hop_length=200, win_length=800).to(device)
         
     elif args.model_type == "spectrogram":
         model = SpectrogramMAE(embed_dim=args.embed_dim, num_heads=args.num_heads, depth=args.depth,
@@ -153,10 +152,8 @@ def main(args, gamma):
 
     model.to(device)
 
-    if args.use_ddp:
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-
     if args.use_ddp == True:
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         ddp_model = DistributedDataParallel(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
     else:
         ddp_model = model
@@ -167,7 +164,7 @@ def main(args, gamma):
     lr = args.lr
     epochs = args.epochs
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer)
+    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.5, total_iters=9)
     # print(f"Loss function is: {loss_fn}")
     print(f"Optimizer is: {optimizer}")
     print(f"LR Scheduler is: {scheduler}")
@@ -179,26 +176,28 @@ def main(args, gamma):
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint['scheduler'])
         print(f"load state dict from {args.model_path} and resume training from epoch {start_epoch+1}")
+        
+        if args.use_ddp == False:
+            state_dict = {}
+            for key in checkpoint["model"]:
+                new_key = key.replace("module.", "")
+                state_dict[new_key] = checkpoint['model'][key]
+    
+            ddp_model.load_state_dict(state_dict)
+        else:
+            ddp_model.load_state_dict(checkpoint["model"])
     else:
         start_epoch = 0
-        checkpoint = torch.load(args.model_path, map_location=device)
-        print(f"load state dict from {args.model_path} and resume training from epoch {start_epoch+1}")
+        # checkpoint = torch.load(args.model_path, map_location=device)
+        # print(f"load state dict from {args.model_path} and resume training from epoch {start_epoch+1}")
 
-    if args.use_ddp == False:
-        state_dict = {}
-        for key in checkpoint["model"]:
-            new_key = key.replace("module.", "")
-            state_dict[new_key] = checkpoint['model'][key]
-
-        ddp_model.load_state_dict(state_dict)
-    else:
-        ddp_model.load_state_dict(checkpoint["model"])
+    
 
     # accelerate
-    accelerator = Accelerator(gradient_accumulation_steps=args.accum_steps)
-    ddp_model, optimizer, train_loader, scheduler = accelerator.prepare(
-        model, optimizer, train_loader, scheduler
-    )
+    # accelerator = Accelerator(gradient_accumulation_steps=args.accum_steps)
+    # ddp_model, optimizer, train_loader, scheduler = accelerator.prepare(
+    #     model, optimizer, train_loader, scheduler
+    # )
 
     # summary writer
     if rank == 0:
@@ -242,11 +241,8 @@ def main(args, gamma):
 
 
                 if args.model_type == "waveform":
-                    input_mb = pqmf.analysis(input_tensor)
-                    output_mb = pqmf.analysis(result)
-                    subband_loss = subband_stft_loss(input_mb, output_mb)
                     l1_loss = spec_l1_loss(input_tensor, result)
-                    loss = subband_loss + l1_loss
+                    loss = l1_loss
 
                 elif args.model_type == "spectrogram":
                     # calc the loss
@@ -255,7 +251,11 @@ def main(args, gamma):
                 total_train_loss += loss.item()
 
                 # calc the gradient
-                accelerator.backward(loss)
+                loss.backward()
+
+                if (step+1) % args.accum_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
 
                 # progress bar
                 pbar.set_description(f"Epoch: {epoch+1}/{epochs} | Step: {step+1}/{len(train_loader)}")
@@ -294,11 +294,8 @@ def main(args, gamma):
                         result = result * var + mean
 
                     if args.model_type == "waveform":
-                        input_mb = pqmf.analysis(input_tensor)
-                        output_mb = pqmf.analysis(result)
-                        subband_loss = subband_stft_loss(input_mb, output_mb)
                         l1_loss = spec_l1_loss(input_tensor, result)
-                        loss = subband_loss + l1_loss
+                        loss = l1_loss
 
                     elif args.model_type == "spectrogram":
                         # calc the loss
@@ -313,7 +310,8 @@ def main(args, gamma):
 
 
             # step the scheduler
-            scheduler.step()
+            if epoch % 10 == 0 and epoch != 0:
+                scheduler.step()
 
             if (epoch+1) % args.save_epoch == 0:
                 checkpoint = {
@@ -322,7 +320,7 @@ def main(args, gamma):
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict()
                 }
-                torch.save(checkpoint, args.save_path + f"/{args.finetuning_task}_{args.masked_ratio}_{model.__class__.__name__}_epoch_{epoch+1}.pth")
+                torch.save(checkpoint, args.save_path + f"/{args.finetuning_task}_{model.__class__.__name__}_epoch_{epoch+1}.pth")
 
             # record the total loss
             mean_train_loss = total_train_loss / len(train_loader)
