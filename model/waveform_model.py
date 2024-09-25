@@ -179,7 +179,6 @@ class WaveMAE(nn.Module):
 
 
         self.masked_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.masking_mode = masking_mode
 
     def random_mask(self, input_tensor, padding_mask=None):
@@ -354,12 +353,12 @@ class WaveMAE(nn.Module):
 
        
         # add cls token
-        shuffled_tokens = torch.cat([self.cls_token.expand(shuffled_tokens.shape[0], 1, shuffled_tokens.shape[2]), shuffled_tokens], dim=1)
-        if masked_padding_mask != None:
-            masked_padding_mask = torch.cat([torch.ones((masked_padding_mask.shape[0], 1)).bool().to(masked_padding_mask.device), masked_padding_mask], dim=1)
+        # shuffled_tokens = torch.cat([self.cls_token.expand(shuffled_tokens.shape[0], 1, shuffled_tokens.shape[2]), shuffled_tokens], dim=1)
+        # if masked_padding_mask != None:
+        #     masked_padding_mask = torch.cat([torch.ones((masked_padding_mask.shape[0], 1)).bool().to(masked_padding_mask.device), masked_padding_mask], dim=1)
 
         # encode
-        shuffled_tokens = self.encoder(shuffled_tokens, padding_mask=masked_padding_mask)[:, 1:, :] # take out the cls token
+        shuffled_tokens = self.encoder(shuffled_tokens, padding_mask=masked_padding_mask) # take out the cls token
 
         if self.masking_mode == "random":
             # append masked tokens and unshuffle
@@ -371,12 +370,15 @@ class WaveMAE(nn.Module):
 
         
         # add cls token
-        tokens = torch.cat([self.cls_token.expand(tokens.shape[0], 1, tokens.shape[2]), tokens], dim=1)
-        if padding_mask != None:
-            padding_mask = torch.cat([torch.ones((padding_mask.shape[0], 1)).bool().to(padding_mask.device), padding_mask], dim=1)
+        # tokens = torch.cat([self.cls_token.expand(tokens.shape[0], 1, tokens.shape[2]), tokens], dim=1)
+        # if padding_mask != None:
+        #     padding_mask = torch.cat([torch.ones((padding_mask.shape[0], 1)).bool().to(padding_mask.device), padding_mask], dim=1)
 
+        # positional embedding
+        tokens = self.pos_embeding(tokens)
+        
         # decode
-        hidden_states = self.decoder(tokens, padding_mask=padding_mask)[:, 1:, :].transpose(1, 2)
+        hidden_states = self.decoder(tokens, padding_mask=padding_mask).transpose(1, 2)
         spectrogram = self.out_feature_projection(hidden_states)
 
         

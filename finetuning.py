@@ -204,6 +204,7 @@ def main(args, gamma):
         writer = SummaryWriter(log_dir=args.log_dir)
 
     # training loop
+    total_training_steps = 0
     ddp_model.train()
     print(f"start training model for {epochs}")
     with tqdm(total=len(train_loader) * epochs) as pbar:
@@ -249,6 +250,9 @@ def main(args, gamma):
                     loss = MSE_loss(result, ground_truth)
                 
                 total_train_loss += loss.item()
+                total_training_steps += 1
+                if rank == 0:
+                    writer.add_scalar("Training Loss of Each Step", loss.item(), total_training_steps)
 
                 # calc the gradient
                 loss.backward()
@@ -283,6 +287,10 @@ def main(args, gamma):
 
                     if args.model_type == "waveform":
                         result = ddp_model(input_tensor, padding_masks)
+                        if rank == 0 and step == 0:
+                            spec = result[0].squeeze(0).detach().cpu().numpy()
+                            writer.add_image("Evaluation Spectrogram", spec)
+                            
                     elif args.model_type == "spectrogram":
                         full_padding_masks = data["full_padding_masks"].to(device)
                         result, normalized_input = ddp_model(input_tensor, padding_masks, full_padding_masks)
