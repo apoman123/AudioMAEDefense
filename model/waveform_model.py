@@ -3,6 +3,7 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 import torchaudio.functional as F
+from torchaudio.transforms import MelSpectrogram
 from model.convolution_parts import *
 from model.transformer_parts import *
 from model.vocoder import Generator
@@ -30,7 +31,7 @@ RESBLOCK_KERNEL_SIZES=[3, 7, 11]
 RESBLOCK_DILATION_SIZES=[[1,3,5], [1,3,5], [1,3,5]]
 RESBLOCK_INITIAL_CHANNEL=256
 REDUCTION_RATE=2
-NUM_MELS=80
+NUM_MELS=128
 POSTNET_KERNELS=[5,5,5,5,5]
 POSTNET_STRIDES=[1,1,1,1,1]
 POSTNET_PADDINGS=[2,2,2,2,2]
@@ -40,76 +41,131 @@ OUT_CHANNEL=512
 DROPOUT = 0.1
 TRANSFORMER_BLOCK_DEPTH = 8
 SAMPLING_RATE = 16000
+N_FFTS = 1024
+WIN_LENGTH = 800
+HOP_LENGTH = 200
 MAX_SPEECH_POSITIONS = 16000 * 30
 PAD_TOKEN_ID=1
 BOS_TOKEN_ID=0
 EOS_TOKEN_ID=2
 
+def spectrogram_padding(input_data, num_mels=128): # spectrogram has 128 mels
+    bsz, channel, seq_len = input_data.shape
+    spectrograms = [input_data[idx] for idx in range(bsz)]
+    spectrogram_lengths = [spec.shape[1] for spec in spectrograms]
 
-class FeatureEncoder(nn.Module):
-    def __init__(self, out_channels, tcn_channels, tcn_dilations, tcn_paddings,
-                 downsample_kernels, downsample_strides, downsample_paddings, bias=True) -> None:
-        super(FeatureEncoder, self).__init__()
-        self.tcn_channels = tcn_channels
-        self.tcn_dilations = tcn_dilations
-        self.tcn_paddings = tcn_paddings
-        self.downsample_kernels = downsample_kernels
-        self.downsample_strides = downsample_strides
-        self.downsample_paddings = downsample_paddings
+    max_length = max(spectrogram_lengths)
+    additional_pads = 16 - max_length % 16 if max_length % 16 != 0 else 0 # needs to pad the spectrogram to have sequence length of the multiple of 16
+    new_max_length = max_length + additional_pads
+    padded_spectrograms = torch.stack([torch.cat([spec, torch.zeros((num_mels, new_max_length - length))], dim=1) for spec, length in zip(spectrograms, spectrogram_lengths)])
 
-        self.tcns = nn.ModuleList([
-            ConvLayer(channels[0], channels[1], 3, 1, dilation, padding=padding) for (channels, dilation, padding) in zip(self.tcn_channels, self.tcn_dilations, self.tcn_paddings)
-        ])
 
-        self.convs = nn.ModuleList([
-            ConvLayer(out_channels, out_channels, kernel, stride, padding=padding) 
-            for (kernel, stride, padding) in zip(self.downsample_kernels, self.downsample_strides, self.downsample_paddings)
-        ])
+    # generate padding masks
+    valid_value_counts = [math.ceil(spec_length / 16) for spec_length in spectrogram_lengths]
+    padding_masks = torch.stack([
 
-    # Copied from transformers.models.unispeech.modeling_unispeech.UniSpeechPreTrainedModel._get_feature_vector_padding_mask
-    def _get_feature_vector_padding_mask(self, feature_vector_length: int, padding_mask: torch.LongTensor):
-        # Effectively padding_mask.sum(-1), but not inplace to be able to run
-        # on inference mode.
-        non_padded_lengths = padding_mask.cumsum(dim=-1)[:, -1]
-        output_lengths = self._get_feat_extract_output_lengths(non_padded_lengths).to(torch.long)
-        batch_size = padding_mask.shape[0]
+        torch.unsqueeze(
+            torch.cat([
+                torch.ones(valid_value_count),
+                torch.zeros((new_max_length // 16 - valid_value_count))],
+                dim=0),
+            dim=0
+            ).repeat(1, num_mels//16).reshape(1, -1)
+                     for valid_value_count in valid_value_counts])
 
-        padding_mask = torch.zeros(
-            (batch_size, feature_vector_length), dtype=padding_mask.dtype, device=padding_mask.device
-        )
-        # these two operations makes sure that all values before the output lengths idxs are attended to
-        padding_mask[(torch.arange(padding_mask.shape[0], device=padding_mask.device), output_lengths - 1)] = 1
-        padding_mask = padding_mask.flip([-1]).cumsum(-1).flip([-1]).bool()
-        return padding_mask
+    padding_masks = torch.squeeze(padding_masks, axis=1)
 
-    # Copied from transformers.models.unispeech.modeling_unispeech.UniSpeechPreTrainedModel._get_feat_extract_output_lengths
-    def _get_feat_extract_output_lengths(self, input_lengths: Union[torch.LongTensor, int]):
-        """
-        Computes the output length of the convolutional layers
-        """
+    # full padding mask
+    full_padding_mask = torch.stack([torch.cat([torch.ones(spec.shape), torch.zeros((num_mels, new_max_length - length))], dim=1) for spec, length in zip(spectrograms, spectrogram_lengths)])
 
-        def _conv_out_length(input_length, kernel_size, stride, padding):
-            # 1D convolutional layer output length formula taken
-            # from https://pytorch.org/docs/stable/generated/torch.nn.Conv1d.html
-            return torch.div(input_length + 2 * padding - kernel_size, stride, rounding_mode="floor") + 1
+    return {"input_values": padded_spectrograms,
+            "padding_masks": padding_masks,
+            "full_padding_masks": full_padding_mask
+            }
 
-        for kernel_size, stride, padding in zip(self.down_sample_kernels, self.down_sample_strides, self.down_sample_paddings):
-            input_lengths = _conv_out_length(input_lengths, kernel_size, stride, padding)
+# class FeatureEncoder(nn.Module):
+#     def __init__(self, out_channels, tcn_channels, tcn_dilations, tcn_paddings,
+#                  downsample_kernels, downsample_strides, downsample_paddings, bias=True) -> None:
+#         super(FeatureEncoder, self).__init__()
+#         self.tcn_channels = tcn_channels
+#         self.tcn_dilations = tcn_dilations
+#         self.tcn_paddings = tcn_paddings
+#         self.downsample_kernels = downsample_kernels
+#         self.downsample_strides = downsample_strides
+#         self.downsample_paddings = downsample_paddings
 
-        return input_lengths
+#         self.tcns = nn.ModuleList([
+#             ConvLayer(channels[0], channels[1], 3, 1, dilation, padding=padding) for (channels, dilation, padding) in zip(self.tcn_channels, self.tcn_dilations, self.tcn_paddings)
+#         ])
 
-    def forward(self, hidden_states, padding_mask=None):
-        for tcn in self.tcns:
-            hidden_states = tcn(hidden_states)
+#         self.convs = nn.ModuleList([
+#             ConvLayer(out_channels, out_channels, kernel, stride, padding=padding) 
+#             for (kernel, stride, padding) in zip(self.downsample_kernels, self.downsample_strides, self.downsample_paddings)
+#         ])
 
-        for conv in self.convs:
-            hidden_states = conv(hidden_states)
+#     # Copied from transformers.models.unispeech.modeling_unispeech.UniSpeechPreTrainedModel._get_feature_vector_padding_mask
+#     def _get_feature_vector_padding_mask(self, feature_vector_length: int, padding_mask: torch.LongTensor):
+#         # Effectively padding_mask.sum(-1), but not inplace to be able to run
+#         # on inference mode.
+#         non_padded_lengths = padding_mask.cumsum(dim=-1)[:, -1]
+#         output_lengths = self._get_feat_extract_output_lengths(non_padded_lengths).to(torch.long)
+#         batch_size = padding_mask.shape[0]
 
-        if padding_mask != None:
-            padding_mask = self._get_feature_vector_padding_mask(hidden_states.shape[2], padding_mask)
+#         padding_mask = torch.zeros(
+#             (batch_size, feature_vector_length), dtype=padding_mask.dtype, device=padding_mask.device
+#         )
+#         # these two operations makes sure that all values before the output lengths idxs are attended to
+#         padding_mask[(torch.arange(padding_mask.shape[0], device=padding_mask.device), output_lengths - 1)] = 1
+#         padding_mask = padding_mask.flip([-1]).cumsum(-1).flip([-1]).bool()
+#         return padding_mask
 
-        return hidden_states, padding_mask
+#     # Copied from transformers.models.unispeech.modeling_unispeech.UniSpeechPreTrainedModel._get_feat_extract_output_lengths
+#     def _get_feat_extract_output_lengths(self, input_lengths: Union[torch.LongTensor, int]):
+#         """
+#         Computes the output length of the convolutional layers
+#         """
 
+#         def _conv_out_length(input_length, kernel_size, stride, padding):
+#             # 1D convolutional layer output length formula taken
+#             # from https://pytorch.org/docs/stable/generated/torch.nn.Conv1d.html
+#             return torch.div(input_length + 2 * padding - kernel_size, stride, rounding_mode="floor") + 1
+
+#         for kernel_size, stride, padding in zip(self.down_sample_kernels, self.down_sample_strides, self.down_sample_paddings):
+#             input_lengths = _conv_out_length(input_lengths, kernel_size, stride, padding)
+
+#         return input_lengths
+
+#     def forward(self, hidden_states, padding_mask=None):
+#         for tcn in self.tcns:
+#             hidden_states = tcn(hidden_states)
+
+#         for conv in self.convs:
+#             hidden_states = conv(hidden_states)
+
+#         if padding_mask != None:
+#             padding_mask = self._get_feature_vector_padding_mask(hidden_states.shape[2], padding_mask)
+
+#         return hidden_states, padding_mask
+
+class PatchToEmbedding(nn.Module):
+    def __init__(self, in_channel, embed_dim, kernel=16, stride=16) -> None:
+        super(PatchToEmbedding, self).__init__()
+        self.conv = nn.Conv2d(in_channel, embed_dim, kernel, stride)
+
+    def forward(self, input_tensor):
+        embeddings = self.conv(input_tensor)
+        return embeddings
+
+class EmbeddingToPatch(nn.Module):
+    def __init__(self, embed_dim, out_channel, kernel=16, stride=16) -> None:
+        super(EmbeddingToPatch, self).__init__()
+
+        self.linear = nn.Linear(embed_dim, kernel * stride * out_channel, bias=True)
+
+    def forward(self, embeddings):
+        result = self.linear(embeddings)
+        return result
+    
 class Encoder(nn.Module):
     def __init__(self, embed_dim, num_heads, dropout, bias, depth) -> None:
         super(Encoder, self).__init__()
@@ -136,46 +192,35 @@ class Decoder(nn.Module):
         return hidden_states
 
 
-# class WaveRecontructor(nn.Module):
-#     def __init__(self, in_channel, out_channel, kernels, strides, bias) -> None:
-#         super(WaveRecontructor, self).__init__()
-#         output_kernel = kernels[0]
-#         output_stride = strides[0]
-#         output_pad = TRANSPOSE_OUTPADS[0]
-
-#         copied_kernels = kernels[:]
-#         copied_strides = strides[:]
-#         copied_out_pads = TRANSPOSE_OUTPADS[:]
-
-#         del copied_kernels[0]
-#         del copied_strides[0]
-#         del copied_out_pads[0]
-
-#         self.wave_reconstructor = nn.ModuleList([
-#             TransposeBatchNormConvLayer(in_channel, in_channel, kernel, stride, bias, out_pad) for (kernel, stride, out_pad) in zip(reversed(copied_kernels), reversed(copied_strides), reversed(copied_out_pads))
-#         ])
-#         self.output_conv = TransposeBatchNormConvLayer(in_channel, out_channel, output_kernel, output_stride, bias, output_pad)
-
-#     def forward(self, hidden_states):
-#         for block in self.wave_reconstructor:
-#             hidden_states = block(hidden_states)
-#         wave = self.output_conv(hidden_states)
-#         return wave
-
-
 class WaveMAE(nn.Module):
     def __init__(self, in_channel=1, middle_channel=512, embed_dim=768,
-                 num_heads=16, downsample_kernels=DOWNSAMPLE_KERNELS, downsample_strides=DOWNSAMPLE_STRIDES, downsample_paddings=DOWNSAMPLE_PADDINGS,
-                 num_mels=NUM_MELS, bias=True, dropout=DROPOUT, depth=12, tcn_channels=TCN_CHANNELS, tcn_dilations=TCN_DILATIONS, tcn_paddings=TCN_PADDINGS,
+                 num_heads=16, num_mels=NUM_MELS, bias=True, dropout=DROPOUT, depth=12, 
                  masking_mode="random", masked_ratio=0.8) -> None:
         super(WaveMAE, self).__init__()
         self.masked_ratio = masked_ratio
-        self.prenet = FeatureEncoder(middle_channel, tcn_channels, tcn_dilations, tcn_paddings, downsample_kernels, downsample_strides, downsample_paddings)
-        self.in_feature_projection = nn.Conv1d(middle_channel, embed_dim, 1, 1)
-        self.pos_embeding = SinusoidalPositionalEncoding(embed_dim)
+        self.stft = MelSpectrogram(
+            n_mels=NUM_MELS,
+            sample_rate=SAMPLING_RATE,
+            n_fft=N_FFTS,
+            win_length=WIN_LENGTH,
+            hop_length=HOP_LENGTH
+        )
+
+        self.patch_to_embeddings = PatchToEmbedding(
+            in_channel=in_channel,
+            embed_dim=embed_dim,
+        )
+
+        self.pos_embedding = SinusoidalPositionalEncoding(embed_dim)
+
         self.encoder = Encoder(embed_dim, num_heads, dropout, bias, depth)
+
         self.decoder = Decoder(embed_dim, num_heads, dropout, bias, depth)
-        self.out_feature_projection = nn.Conv1d(embed_dim, num_mels, 1, 1)
+
+        self.embeddings_to_patch = EmbeddingToPatch(
+            embed_dim=embed_dim,
+            out_channel=in_channel
+            )
 
 
         self.masked_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
@@ -193,7 +238,7 @@ class WaveMAE(nn.Module):
         # deal with padding mask
         if padding_mask != None:
             shuffled_padding_mask = padding_mask[:, token_order]
-            padding_mask = shuffled_padding_mask[:, :int(seq_len*self.masked_ratio)]
+            padding_mask = shuffled_padding_mask[:, :int(seq_len - seq_len*self.masked_ratio)]
 
         return shuffled_tokens, token_order, padding_mask
 
@@ -336,18 +381,27 @@ class WaveMAE(nn.Module):
 
         return input_tensor
 
-    def forward(self, input_tensor, padding_mask=None):
-        full_padding_mask = padding_mask
-        hidden_states, padding_mask = self.prenet(input_tensor, padding_mask)
-        hidden_states = self.in_feature_projection(hidden_states)
-        hidden_states = hidden_states.transpose(1, 2)
-        hidden_states = self.pos_embeding(hidden_states)
+    def forward(self, input_tensor):
+        # full_padding_mask = padding_mask
+        # hidden_states, padding_mask = self.prenet(input_tensor, padding_mask)
+        # hidden_states = self.in_feature_projection(hidden_states)
+        # hidden_states = hidden_states.transpose(1, 2)
 
+        spec = self.stft(input_tensor).squeeze(1)
+        spec_process_result = spectrogram_padding(spec)
+        bsz, height, width = spec_process_result["input_values"].shape
+        
+        # patch to embedding
+        hidden_states = self.patch_to_embeddings(spec_process_result["input_values"].unsqueeze(1)).flatten(2).transpose(1, 2)
+       
+        # positional encoding
+        hidden_states = self.pos_embedding(hidden_states)
+        
         # shuffle
         if self.masking_mode == "random":
-            shuffled_tokens, token_order, masked_padding_mask = self.random_mask(hidden_states, padding_mask)
+            shuffled_tokens, token_order, masked_padding_mask = self.random_mask(hidden_states, spec_process_result["padding_masks"])
         elif self.masking_mode == "uniform":
-            shuffled_tokens, token_order, seq_len, masked_padding_mask = self.uniform_mask(hidden_states, padding_mask)
+            shuffled_tokens, token_order, seq_len, masked_padding_mask = self.uniform_mask(hidden_states, spec_process_result["padding_masks"])
         elif self.masking_mode == "no_mask":
             shuffled_tokens = hidden_states
 
@@ -375,22 +429,24 @@ class WaveMAE(nn.Module):
         #     padding_mask = torch.cat([torch.ones((padding_mask.shape[0], 1)).bool().to(padding_mask.device), padding_mask], dim=1)
 
         # positional embedding
-        tokens = self.pos_embeding(tokens)
-        
-        # decode
-        hidden_states = self.decoder(tokens, padding_mask=padding_mask).transpose(1, 2)
-        spectrogram = self.out_feature_projection(hidden_states)
+        tokens = self.pos_embedding(tokens)
 
+        # decode
+        hidden_states = self.decoder(tokens, padding_mask=spec_process_result["padding_masks"])
+
+        # patch to embedding
+        spectrograms = self.embeddings_to_patch(hidden_states)
+
+        # reshape back to (bsz, embed_dim, height, width)
+        spectrograms = spectrograms.reshape(bsz, height, width)
         
         # resample input to 16000hz (hifigan default is 22050hz)
         # wave = F.resample(wave, orig_freq=22050, new_freq=16000)
 
         # mask out the padding part
-        # if full_padding_mask != None:
-        #     full_padding_mask = full_padding_mask.unsqueeze(1)
-        #     wave = wave.masked_fill(full_padding_mask == 0, 0)
+        spectrograms = spectrograms.masked_fill(spec_process_result["full_padding_masks"] == 0, 0)
 
-        return spectrogram
+        return spectrograms
 
 
 

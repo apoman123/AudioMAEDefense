@@ -15,7 +15,7 @@
     "resblock_dilation_sizes": [[1,3,5], [1,3,5], [1,3,5]],
 
     "segment_size": 6400,
-    "num_mels": 80,
+    "num_mels": 128,
     "num_freq": 1025,
     "n_fft": 1024,
     "hop_size": 200,

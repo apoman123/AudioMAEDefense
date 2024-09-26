@@ -142,12 +142,12 @@ def main(args, gamma):
     if args.model_type == "waveform":
         model = WaveMAE(middle_channel=args.middle_channel, embed_dim=args.embed_dim, num_heads=args.num_heads,
                         depth=args.depth, masking_mode=args.masking_mode, masked_ratio=args.masked_ratio)
-        spec_l1_loss = Spectrogram_L1_Loss(sample_rate=16000, num_mels=80, n_fft=1024, hop_length=200, win_length=800).to(device)
+        # spec_l1_loss = Spectrogram_L1_Loss(sample_rate=16000, num_mels=80, n_fft=1024, hop_length=200, win_length=800).to(device)
         
     elif args.model_type == "spectrogram":
         model = SpectrogramMAE(embed_dim=args.embed_dim, num_heads=args.num_heads, depth=args.depth,
                             masking_mode=args.masking_mode, mask_ratio=args.masked_ratio)
-        MSE_loss = nn.MSELoss()
+        
     masking_choices = [0.25, 0.5, 0.75]
 
     model.to(device)
@@ -165,6 +165,7 @@ def main(args, gamma):
     epochs = args.epochs
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.5, total_iters=9)
+    MSE_loss = nn.MSELoss()
     # print(f"Loss function is: {loss_fn}")
     print(f"Optimizer is: {optimizer}")
     print(f"LR Scheduler is: {scheduler}")
@@ -239,15 +240,9 @@ def main(args, gamma):
                     mean = ddp_model.module.patch_to_embedding.batch_norm.running_mean.to(device)
                     var = ddp_model.module.patch_to_embedding.batch_norm.running_var.to(device)
                     result = result * var + mean
-
-
-                if args.model_type == "waveform":
-                    l1_loss = spec_l1_loss(input_tensor, result)
-                    loss = l1_loss
-
-                elif args.model_type == "spectrogram":
-                    # calc the loss
-                    loss = MSE_loss(result, ground_truth)
+                
+                # calc the loss
+                loss = MSE_loss(result, ground_truth)
                 
                 total_train_loss += loss.item()
                 total_training_steps += 1
@@ -289,8 +284,8 @@ def main(args, gamma):
                         result = ddp_model(input_tensor, padding_masks)
                         if rank == 0 and step == 0:
                             spec = result[0].squeeze(0).detach().cpu().numpy()
-                            writer.add_image("Evaluation Spectrogram", spec)
-                            
+                            writer.add_image("Evaluation Spectrogram", spec, global_step=epoch+1, dataformats="HW")
+
                     elif args.model_type == "spectrogram":
                         full_padding_masks = data["full_padding_masks"].to(device)
                         result, normalized_input = ddp_model(input_tensor, padding_masks, full_padding_masks)
@@ -301,13 +296,8 @@ def main(args, gamma):
                         var = ddp_model.module.patch_to_embedding.batch_norm.running_var.to(device)
                         result = result * var + mean
 
-                    if args.model_type == "waveform":
-                        l1_loss = spec_l1_loss(input_tensor, result)
-                        loss = l1_loss
-
-                    elif args.model_type == "spectrogram":
-                        # calc the loss
-                        loss = MSE_loss(result, ground_truth)
+                    # calc the loss
+                    loss = MSE_loss(result, ground_truth)
                         
                     total_eval_loss += loss.item()
 
