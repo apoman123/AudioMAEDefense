@@ -57,7 +57,7 @@ def spectrogram_padding(input_data, num_mels=128): # spectrogram has 128 mels
     max_length = max(spectrogram_lengths)
     additional_pads = 16 - max_length % 16 if max_length % 16 != 0 else 0 # needs to pad the spectrogram to have sequence length of the multiple of 16
     new_max_length = max_length + additional_pads
-    padded_spectrograms = torch.stack([torch.cat([spec, torch.zeros((num_mels, new_max_length - length))], dim=1) for spec, length in zip(spectrograms, spectrogram_lengths)])
+    padded_spectrograms = torch.stack([torch.cat([spec, torch.zeros((num_mels, new_max_length - length))], dim=1) for spec, length in zip(spectrograms, spectrogram_lengths)]).to(input_data.device)
 
 
     # generate padding masks
@@ -71,12 +71,12 @@ def spectrogram_padding(input_data, num_mels=128): # spectrogram has 128 mels
                 dim=0),
             dim=0
             ).repeat(1, num_mels//16).reshape(1, -1)
-                     for valid_value_count in valid_value_counts])
+                     for valid_value_count in valid_value_counts]).to(input_data.device)
 
-    padding_masks = torch.squeeze(padding_masks, axis=1)
+    padding_masks = torch.squeeze(padding_masks, axis=1).to(input_data.device)
 
     # full padding mask
-    full_padding_mask = torch.stack([torch.cat([torch.ones(spec.shape), torch.zeros((num_mels, new_max_length - length))], dim=1) for spec, length in zip(spectrograms, spectrogram_lengths)])
+    full_padding_mask = torch.stack([torch.cat([torch.ones(spec.shape), torch.zeros((num_mels, new_max_length - length))], dim=1) for spec, length in zip(spectrograms, spectrogram_lengths)]).to(input_data.device)
 
     return {"input_values": padded_spectrograms,
             "padding_masks": padding_masks,
@@ -389,6 +389,7 @@ class WaveMAE(nn.Module):
 
         spec = self.stft(input_tensor).squeeze(1)
         spec_process_result = spectrogram_padding(spec)
+        stft_spec = spec_process_result["input_values"]
         bsz, height, width = spec_process_result["input_values"].shape
         
         # patch to embedding
@@ -446,7 +447,7 @@ class WaveMAE(nn.Module):
         # mask out the padding part
         spectrograms = spectrograms.masked_fill(spec_process_result["full_padding_masks"] == 0, 0)
 
-        return spectrograms
+        return spectrograms, stft_spec
 
 
 

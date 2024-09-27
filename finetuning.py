@@ -222,7 +222,7 @@ def main(args, gamma):
                 if "noisy_input" in data:
                     input_tensor = data["noisy_input"].to(device)
                     padding_masks = data["padding_masks"].to(device)
-                    ground_truth = data["input_values"].to(device)
+                    # ground_truth = data["input_values"].to(device)
 
                 else:
                     input_tensor = data["input_values"].to(device)
@@ -230,7 +230,7 @@ def main(args, gamma):
                     ground_truth = input_tensor
 
                 if args.model_type == "waveform":
-                    result = ddp_model(input_tensor, padding_masks)
+                    result, ground_truth = ddp_model(input_tensor)
                 elif args.model_type == "spectrogram":
                     full_padding_masks = data["full_padding_masks"].to(device)
                     result, normalized_input = ddp_model(input_tensor, padding_masks, full_padding_masks)
@@ -273,7 +273,7 @@ def main(args, gamma):
                     if "noisy_input" in data:
                         input_tensor = data["noisy_input"].to(device)
                         padding_masks = data["padding_masks"].to(device)
-                        ground_truth = data["input_values"].to(device)
+                        # ground_truth = data["input_values"].to(device)
 
                     else:
                         input_tensor = data["input_values"].to(device)
@@ -281,7 +281,7 @@ def main(args, gamma):
                         ground_truth = input_tensor
 
                     if args.model_type == "waveform":
-                        result = ddp_model(input_tensor, padding_masks)
+                        result, ground_truth = ddp_model(input_tensor)
                         if rank == 0 and step == 0:
                             spec = result[0].squeeze(0).detach().cpu().numpy()
                             writer.add_image("Evaluation Spectrogram", spec, global_step=epoch+1, dataformats="HW")
