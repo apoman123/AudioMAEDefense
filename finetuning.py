@@ -231,6 +231,18 @@ def main(args, gamma):
 
                 if args.model_type == "waveform":
                     result, ground_truth = ddp_model(input_tensor)
+                    
+                
+                    # mean and var of input data extracted from the model 
+                    mean = ddp_model.module.batch_norm.running_mean.to(device)
+                    var = ddp_model.module.batch_norm.running_var.to(device)
+
+                    # result
+                    result = result * torch.sqrt(var) + mean
+
+                    # input data gaussian normalization
+                    ground_truth = (ground_truth - mean) / torch.sqrt(var)
+
                 elif args.model_type == "spectrogram":
                     full_padding_masks = data["full_padding_masks"].to(device)
                     result, normalized_input = ddp_model(input_tensor, padding_masks, full_padding_masks)

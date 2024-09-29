@@ -206,6 +206,9 @@ class WaveMAE(nn.Module):
             hop_length=HOP_LENGTH
         )
 
+        # input data normalization
+        self.batch_norm = nn.BatchNorm2d(1, affine=False)
+
         self.patch_to_embeddings = PatchToEmbedding(
             in_channel=in_channel,
             embed_dim=embed_dim,
@@ -392,51 +395,43 @@ class WaveMAE(nn.Module):
         stft_spec = spec_process_result["input_values"]
         bsz, height, width = spec_process_result["input_values"].shape
         
+        # input data normalization
+        hidden_states = self.batch_norm(spec_process_result["input_values"].unsqueeze(1))
+
         # patch to embedding
-        hidden_states = self.patch_to_embeddings(spec_process_result["input_values"].unsqueeze(1)).flatten(2).transpose(1, 2)
-       
+        hidden_states = self.patch_to_embeddings(hidden_states).flatten(2).transpose(1, 2)
+
         # positional encoding
         hidden_states = self.pos_embedding(hidden_states)
         
-        # shuffle
         if self.masking_mode == "random":
-            shuffled_tokens, token_order, masked_padding_mask = self.random_mask(hidden_states, spec_process_result["padding_masks"])
-        elif self.masking_mode == "uniform":
-            shuffled_tokens, token_order, seq_len, masked_padding_mask = self.uniform_mask(hidden_states, spec_process_result["padding_masks"])
-        elif self.masking_mode == "no_mask":
-            shuffled_tokens = hidden_states
+            masked_tokens, token_order, masked_padding_masks = self.random_mask(hidden_states, spec_process_result["padding_masks"])
 
-       
-        # add cls token
-        # shuffled_tokens = torch.cat([self.cls_token.expand(shuffled_tokens.shape[0], 1, shuffled_tokens.shape[2]), shuffled_tokens], dim=1)
-        # if masked_padding_mask != None:
-        #     masked_padding_mask = torch.cat([torch.ones((masked_padding_mask.shape[0], 1)).bool().to(masked_padding_mask.device), masked_padding_mask], dim=1)
+        elif self.masking_mode == "uniform":
+            masked_tokens, token_order, seq_len, masked_padding_masks = self.uniform_mask(hidden_states, spec_process_result["padding_masks"])
+
+        elif self.masking_mode == "no_mask":
+            masked_tokens = hidden_states
+
 
         # encode
-        shuffled_tokens = self.encoder(shuffled_tokens, padding_mask=masked_padding_mask) # take out the cls token
+        masked_tokens = self.encoder(masked_tokens, padding_mask=masked_padding_masks)
 
         if self.masking_mode == "random":
-            # append masked tokens and unshuffle
-            tokens = self.add_masked_tokens_and_unshuffle(shuffled_tokens, token_order)
+            tokens = self.add_masked_tokens_and_unshuffle(masked_tokens, token_order)
         elif self.masking_mode == "uniform":
-            tokens = self.uniform_add_masked_tokens_and_unshuffle(shuffled_tokens, token_order, seq_len)
+            tokens = self.uniform_add_masked_tokens_and_unshuffle(masked_tokens, token_order, seq_len)
         elif self.masking_mode == "no_mask":
-            tokens = shuffled_tokens
+            tokens = masked_tokens
 
-        
-        # add cls token
-        # tokens = torch.cat([self.cls_token.expand(tokens.shape[0], 1, tokens.shape[2]), tokens], dim=1)
-        # if padding_mask != None:
-        #     padding_mask = torch.cat([torch.ones((padding_mask.shape[0], 1)).bool().to(padding_mask.device), padding_mask], dim=1)
-
-        # positional embedding
+        # positional encoding
         tokens = self.pos_embedding(tokens)
 
         # decode
-        hidden_states = self.decoder(tokens, padding_mask=spec_process_result["padding_masks"])
+        embeddings = self.decoder(tokens, padding_mask=spec_process_result["padding_masks"])
 
-        # patch to embedding
-        spectrograms = self.embeddings_to_patch(hidden_states)
+        # embedding to patch
+        spectrograms = self.embeddings_to_patch(embeddings)
 
         # reshape back to (bsz, embed_dim, height, width)
         spectrograms = spectrograms.reshape(bsz, height, width)

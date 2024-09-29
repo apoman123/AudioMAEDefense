@@ -94,7 +94,7 @@ class SpectrogramMAE(nn.Module):
         # deal with padding mask
         if padding_mask != None:
             shuffled_padding_mask = padding_mask[:, token_order]
-            padding_mask = shuffled_padding_mask[:, :int(seq_len*self.masked_ratio)]
+            padding_mask = shuffled_padding_mask[:, :int(seq_len - seq_len*self.masked_ratio)]
 
         return shuffled_tokens, token_order, padding_mask
 
