@@ -240,9 +240,6 @@ def main(args, gamma):
                     # result
                     result = result * torch.sqrt(var) + mean
 
-                    # input data gaussian normalization
-                    ground_truth = (ground_truth - mean) / torch.sqrt(var)
-
                 elif args.model_type == "spectrogram":
                     full_padding_masks = data["full_padding_masks"].to(device)
                     result, normalized_input = ddp_model(input_tensor, padding_masks, full_padding_masks)
@@ -297,6 +294,13 @@ def main(args, gamma):
                         if rank == 0 and step == 0:
                             spec = result[0].squeeze(0).detach().cpu().numpy()
                             writer.add_image("Evaluation Spectrogram", spec, global_step=epoch+1, dataformats="HW")
+
+                        # mean and var of input data extracted from the model 
+                        mean = ddp_model.module.batch_norm.running_mean.to(device)
+                        var = ddp_model.module.batch_norm.running_var.to(device)
+
+                        # result
+                        result = result * torch.sqrt(var) + mean
 
                     elif args.model_type == "spectrogram":
                         full_padding_masks = data["full_padding_masks"].to(device)
