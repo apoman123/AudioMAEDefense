@@ -237,8 +237,8 @@ def main(args, gamma):
                     mean = ddp_model.module.batch_norm.running_mean.to(device)
                     var = ddp_model.module.batch_norm.running_var.to(device)
 
-                    # result
-                    result = result * torch.sqrt(var) + mean
+                    # ground truth normalization
+                    ground_truth = (ground_truth - mean) / torch.sqrt(var)
 
                 elif args.model_type == "spectrogram":
                     full_padding_masks = data["full_padding_masks"].to(device)
@@ -299,8 +299,8 @@ def main(args, gamma):
                         mean = ddp_model.module.batch_norm.running_mean.to(device)
                         var = ddp_model.module.batch_norm.running_var.to(device)
 
-                        # result
-                        result = result * torch.sqrt(var) + mean
+                        # ground truth normalization
+                        ground_truth = (ground_truth - mean) / torch.sqrt(var)
 
                     elif args.model_type == "spectrogram":
                         full_padding_masks = data["full_padding_masks"].to(device)

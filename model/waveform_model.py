@@ -57,7 +57,7 @@ def spectrogram_padding(input_data, num_mels=128): # spectrogram has 128 mels
     max_length = max(spectrogram_lengths)
     additional_pads = 16 - max_length % 16 if max_length % 16 != 0 else 0 # needs to pad the spectrogram to have sequence length of the multiple of 16
     new_max_length = max_length + additional_pads
-    padded_spectrograms = torch.stack([torch.cat([spec, torch.zeros((num_mels, new_max_length - length))], dim=1) for spec, length in zip(spectrograms, spectrogram_lengths)]).to(input_data.device)
+    padded_spectrograms = torch.stack([torch.cat([spec, torch.zeros((num_mels, new_max_length - length)).to(input_data.device)], dim=1) for spec, length in zip(spectrograms, spectrogram_lengths)]).to(input_data.device)
 
 
     # generate padding masks
