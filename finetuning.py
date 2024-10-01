@@ -52,6 +52,7 @@ def get_args():
     parser.add_argument("--epochs", default=100, type=int)
     parser.add_argument("--finetuning_task", default="masked_nam", choices=["nam", "uniform_mask", "random_mask", "masked_nam"])
     parser.add_argument("--lr", default=1e-5, type=float)
+    parser.add_argument("--warm_ups", default=3, type=int)
     parser.add_argument("--max_lr", default=2e-4, type=float)
     parser.add_argument("--save_epoch", default=1, type=int)
     parser.add_argument("--model_path", default=None, type=str)
@@ -111,6 +112,13 @@ def main(args, gamma):
         whole_set = load_from_disk("/data/nas07/PersonalData/apoman123/vctk_with_speaker_label")
         whole_set = whole_set.cast_column("audio", Audio(sampling_rate=16000))
         whole_set = whole_set.shuffle(seed=42).train_test_split(test_size=0.1)
+
+        # data normalization
+        mean = 3.431962013244629
+        std = 44.32744216918945
+
+
+
     elif args.dataset == "speech_commands":
         whole_set = load_dataset("google/speech_commands", "v0.02")
     elif args.dataset == "esc50":
@@ -140,7 +148,7 @@ def main(args, gamma):
 
     # model
     if args.model_type == "waveform":
-        model = WaveMAE(middle_channel=args.middle_channel, embed_dim=args.embed_dim, num_heads=args.num_heads,
+        model = WaveMAE(spec_mean=mean, spec_std=std, middle_channel=args.middle_channel, embed_dim=args.embed_dim, num_heads=args.num_heads,
                         depth=args.depth, masking_mode=args.masking_mode, masked_ratio=args.masked_ratio)
         # spec_l1_loss = Spectrogram_L1_Loss(sample_rate=16000, num_mels=80, n_fft=1024, hop_length=200, win_length=800).to(device)
         
@@ -163,8 +171,8 @@ def main(args, gamma):
     # optimization
     lr = args.lr
     epochs = args.epochs
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.5, total_iters=9)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, eta_min=1e-6)
     MSE_loss = nn.MSELoss()
     # print(f"Loss function is: {loss_fn}")
     print(f"Optimizer is: {optimizer}")
@@ -231,14 +239,6 @@ def main(args, gamma):
 
                 if args.model_type == "waveform":
                     result, ground_truth = ddp_model(input_tensor)
-                    
-                
-                    # mean and var of input data extracted from the model 
-                    mean = ddp_model.module.batch_norm.running_mean.to(device)
-                    var = ddp_model.module.batch_norm.running_var.to(device)
-
-                    # ground truth normalization
-                    ground_truth = (ground_truth - mean) / torch.sqrt(var)
 
                 elif args.model_type == "spectrogram":
                     full_padding_masks = data["full_padding_masks"].to(device)
@@ -295,13 +295,6 @@ def main(args, gamma):
                             spec = result[0].squeeze(0).detach().cpu().numpy()
                             writer.add_image("Evaluation Spectrogram", spec, global_step=epoch+1, dataformats="HW")
 
-                        # mean and var of input data extracted from the model 
-                        mean = ddp_model.module.batch_norm.running_mean.to(device)
-                        var = ddp_model.module.batch_norm.running_var.to(device)
-
-                        # ground truth normalization
-                        ground_truth = (ground_truth - mean) / torch.sqrt(var)
-
                     elif args.model_type == "spectrogram":
                         full_padding_masks = data["full_padding_masks"].to(device)
                         result, normalized_input = ddp_model(input_tensor, padding_masks, full_padding_masks)
@@ -324,7 +317,7 @@ def main(args, gamma):
 
 
             # step the scheduler
-            if epoch % 10 == 0 and epoch != 0:
+            if (epoch+1) > args.warm_ups:
                 scheduler.step()
 
             if (epoch+1) % args.save_epoch == 0:

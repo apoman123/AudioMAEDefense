@@ -7,7 +7,7 @@ from torchaudio.transforms import MelSpectrogram
 from model.convolution_parts import *
 from model.transformer_parts import *
 from model.vocoder import Generator
-
+from utils.spectrogram_transform import mel_spectrogram
 
 import json
 import random
@@ -193,22 +193,17 @@ class Decoder(nn.Module):
 
 
 class WaveMAE(nn.Module):
-    def __init__(self, in_channel=1, middle_channel=512, embed_dim=768,
+    def __init__(self, spec_mean, spec_std, in_channel=1, middle_channel=512, embed_dim=768,
                  num_heads=16, num_mels=NUM_MELS, bias=True, dropout=DROPOUT, depth=12, 
                  masking_mode="random", masked_ratio=0.8) -> None:
         super(WaveMAE, self).__init__()
+        # data normalization
+        self.spec_mean = spec_mean
+        self.spec_std = spec_std
+
         self.masked_ratio = masked_ratio
-        self.stft = MelSpectrogram(
-            n_mels=NUM_MELS,
-            sample_rate=SAMPLING_RATE,
-            n_fft=N_FFTS,
-            win_length=WIN_LENGTH,
-            hop_length=HOP_LENGTH
-        )
 
         # input data normalization
-        self.batch_norm = nn.BatchNorm2d(1, affine=False)
-
         self.patch_to_embeddings = PatchToEmbedding(
             in_channel=in_channel,
             embed_dim=embed_dim,
@@ -228,6 +223,28 @@ class WaveMAE(nn.Module):
 
         self.masked_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.masking_mode = masking_mode
+
+
+        # weight initialization
+        torch.nn.init.normal_(self.mask_token, std=.02)
+
+        w = self.patch_to_embeddings.conv.weight.data
+        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+
+
+        # initialize nn.Linear and nn.LayerNorm
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            # we use xavier_uniform following official JAX ViT:
+            torch.nn.init.xavier_uniform_(m.weight)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
 
     def random_mask(self, input_tensor, padding_mask=None):
         bsz, seq_len, embed_dim = input_tensor.shape
@@ -384,22 +401,32 @@ class WaveMAE(nn.Module):
 
         return input_tensor
 
-    def forward(self, input_tensor):
+    def forward(self, input_tensor:torch.Tensor):
         # full_padding_mask = padding_mask
         # hidden_states, padding_mask = self.prenet(input_tensor, padding_mask)
         # hidden_states = self.in_feature_projection(hidden_states)
         # hidden_states = hidden_states.transpose(1, 2)
-
-        spec = self.stft(input_tensor).squeeze(1)
+        
+        # transform to spectrogram
+        spec = mel_spectrogram(
+            input_tensor.squeeze(1), 
+            n_fft=N_FFTS,
+            num_mels=NUM_MELS,
+            sampling_rate=SAMPLING_RATE,
+            hop_size=HOP_LENGTH,
+            win_size=WIN_LENGTH,
+            fmin=0,
+            fmax=8000
+            )
+        
         spec_process_result = spectrogram_padding(spec)
-        stft_spec = spec_process_result["input_values"]
         bsz, height, width = spec_process_result["input_values"].shape
         
         # input data normalization
-        hidden_states = self.batch_norm(spec_process_result["input_values"].unsqueeze(1))
+        stft_spec = spec_process_result["input_values"] = (spec_process_result["input_values"] - self.spec_mean) / self.spec_std
 
         # patch to embedding
-        hidden_states = self.patch_to_embeddings(hidden_states).flatten(2).transpose(1, 2)
+        hidden_states = self.patch_to_embeddings(spec_process_result["input_values"]).flatten(2).transpose(1, 2)
 
         # positional encoding
         hidden_states = self.pos_embedding(hidden_states)
@@ -435,9 +462,6 @@ class WaveMAE(nn.Module):
 
         # reshape back to (bsz, embed_dim, height, width)
         spectrograms = spectrograms.reshape(bsz, height, width)
-        
-        # resample input to 16000hz (hifigan default is 22050hz)
-        # wave = F.resample(wave, orig_freq=22050, new_freq=16000)
 
         # mask out the padding part
         spectrograms = spectrograms.masked_fill(spec_process_result["full_padding_masks"] == 0, 0)
