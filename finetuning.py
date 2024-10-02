@@ -19,6 +19,7 @@ from transformers import SequenceFeatureExtractor
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributions.gamma import Gamma
 from torchaudio.transforms import MelSpectrogram
+from librosa.util import normalize
 
 from model.waveform_model import WaveMAE
 from model.spectrogram_model import SpectrogramMAE
@@ -114,8 +115,8 @@ def main(args, gamma):
         whole_set = whole_set.shuffle(seed=42).train_test_split(test_size=0.1)
 
         # data normalization
-        mean = 3.431962013244629
-        std = 44.32744216918945
+        mean = -6.022045593828664
+        std = 2.5053068269620598
 
 
 
